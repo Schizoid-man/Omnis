@@ -1,0 +1,9 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts (omnis-tui)
+omnis-tui/target/
+
+# Node / Expo (omnis-tui is Rust, but just in case)
+node_modules/

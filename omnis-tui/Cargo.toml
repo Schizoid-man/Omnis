@@ -1,0 +1,92 @@
+[package]
+name = "omnis-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Omnis — cross-platform TUI client"
+
+[[bin]]
+name = "omnis"
+path = "src/main.rs"
+
+[[bin]]
+name = "omnis-launcher"
+path = "src/bin/launcher.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tungstenite = "0.24"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto — must exactly match mobile P-384/HKDF/AES-GCM/PBKDF2 pipeline
+p384 = { version = "0.13", features = ["ecdh", "pkcs8"] }
+elliptic-curve = { version = "0.13", features = ["pkcs8"] }
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", features = ["hmac", "parallel"] }
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+rand = "0.8"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Secure storage
+keyring = "3"
+
+# Utilities
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# System-tray icon (cross-platform; fully functional on Windows)
+tray-icon = "0.19"
+
+# Desktop notifications (Windows toast / macOS UNUserNotification / Linux libnotify)
+notify-rust = "4"
+
+# Audio playback for /fah sound command
+rodio = { version = "0.19", default-features = false, features = ["mp3"] }
+
+# Native file-picker dialog
+rfd = { version = "0.14", features = ["tokio"] }
+
+# Clipboard access (paste-to-attach)
+arboard = "3"
+
+# Image decoding / preview
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+# ── VoIP audio pipeline ──────────────────────────────────────────
+# Cross-platform audio capture + playback (WASAPI / CoreAudio / ALSA)
+cpal = "0.15"
+# Pure-Rust RNNoise ML noise suppression (48 kHz, 480-sample frames)
+nnnoiseless = "0.5"
+# Sample-rate conversion (device rate ↔ 48 kHz)
+rubato = "0.15"
+# Biquad IIR filters (highpass cutoff)
+biquad = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
