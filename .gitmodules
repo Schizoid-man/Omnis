@@ -1,0 +1,6 @@
+[submodule "Omnis"]
+	path = Omnis
+	url = https://github.com/Schizoid-man/omnis-frontend.git
+[submodule "Omnis-Backend"]
+	path = Omnis-Backend
+	url = https://github.com/Schizoid-man/omnis-backend-py.git
