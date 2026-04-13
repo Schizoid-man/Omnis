@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Omnis Desktop
+Comment=Omnis desktop client
+Exec=omnis-desktop
+Icon=com.omnis.desktop
+Terminal=false
+Categories=Network;Chat;
+StartupNotify=true
