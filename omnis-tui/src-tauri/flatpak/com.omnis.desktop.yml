@@ -1,0 +1,35 @@
+app-id: com.omnis.desktop
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+command: omnis-desktop
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-download
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
+  env:
+    CARGO_HOME: /run/build/omnis/.cargo
+modules:
+  - name: omnis-desktop
+    buildsystem: simple
+    build-commands:
+      - npm --prefix web ci
+      - cargo build --release --manifest-path src-tauri/Cargo.toml
+      - install -Dm755 src-tauri/target/release/omnis-desktop /app/bin/omnis-desktop
+      - install -Dm644 src-tauri/flatpak/com.omnis.desktop.desktop /app/share/applications/com.omnis.desktop.desktop
+      - install -Dm644 src-tauri/flatpak/com.omnis.desktop.metainfo.xml /app/share/metainfo/com.omnis.desktop.metainfo.xml
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.omnis.desktop.png
+    sources:
+      - type: dir
+        path: ../..
