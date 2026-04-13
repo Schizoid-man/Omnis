@@ -1,0 +1,70 @@
+name: Desktop Packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-flatpak:
+    name: Linux Flatpak (x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder xz-utils
+
+      - name: Configure Flathub remote
+        run: |
+          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build Flatpak bundle
+        run: |
+          cd omnis-tui/src-tauri/flatpak
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=repo build-dir com.omnis.desktop.yml
+          flatpak build-bundle --arch=x86_64 repo omnis-desktop-linux-x86_64.flatpak com.omnis.desktop
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnis-desktop-linux-flatpak
+          path: omnis-tui/src-tauri/flatpak/omnis-desktop-linux-x86_64.flatpak
+
+  macos-dmg:
+    name: macOS DMG
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: omnis-tui/web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm --prefix omnis-tui/web ci
+
+      - name: Build DMG bundle
+        run: npm --prefix omnis-tui/web run tauri -- build --bundles dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnis-desktop-macos-dmg
+          path: omnis-tui/src-tauri/target/release/bundle/dmg/*.dmg
