@@ -25,7 +25,7 @@ jobs:
 
       - name: Configure Flathub remote
         run: |
-          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
       - name: Build Flatpak bundle
         run: |
@@ -58,7 +58,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
-        run: npm --prefix omnis-tui/web ci
+        run: npm --prefix omnis-tui/web install --include=optional
 
       - name: Build DMG bundle
         run: npm --prefix omnis-tui/web run tauri -- build --bundles dmg
