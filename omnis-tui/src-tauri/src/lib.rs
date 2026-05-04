@@ -911,6 +911,32 @@ async fn sessions_revoke_other(state: State<'_, OmnisState>) -> Result<StatusRes
 }
 
 #[tauri::command]
+fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, String> {
+  let data_dir = app
+    .path()
+    .app_data_dir()
+    .map_err(|e| format!("could not resolve app data dir: {e}"))?;
+
+  let token_path = data_dir.join("fcm_token.json");
+  if !token_path.exists() {
+    return Ok(None);
+  }
+
+  let raw = std::fs::read_to_string(&token_path)
+    .map_err(|e| format!("failed to read fcm token file: {e}"))?;
+
+  #[derive(serde::Deserialize)]
+  struct TokenFile {
+    token: String,
+  }
+
+  let parsed: TokenFile = serde_json::from_str(&raw)
+    .map_err(|e| format!("invalid fcm token file: {e}"))?;
+
+  Ok(Some(parsed.token))
+}
+
+#[tauri::command]
 async fn media_upload_chunk(
   state: State<'_, OmnisState>,
   input: MediaUploadInput,
@@ -1061,6 +1087,7 @@ pub fn run() {
       sessions_list,
       sessions_revoke,
       sessions_revoke_other,
+      get_fcm_token,
       media_upload_chunk,
       media_get_meta,
       media_download
