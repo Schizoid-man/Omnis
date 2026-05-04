@@ -3,18 +3,27 @@
 @tailwind utilities;
 
 :root {
-  --background: 0 0% 0%;
-  --foreground: 0 0% 90%;
-  --card: 0 0% 6%;
-  --card-foreground: 0 0% 90%;
-  --border: 0 0% 19%;
-  --input: 0 0% 6%;
-  --primary: 203 18% 66%;
-  --primary-foreground: 0 0% 5%;
-  --secondary: 0 0% 8%;
-  --secondary-foreground: 0 0% 86%;
-  --muted: 0 0% 10%;
-  --muted-foreground: 210 8% 63%;
+  /* ── Obsidian Signal palette ── */
+  --background:             224 50%  5%;   /* #080910 deep obsidian */
+  --foreground:             212 22% 88%;   /* #d2dcea near-white    */
+  --card:                   224 44%  8%;   /* #0d1120 dark surface  */
+  --card-foreground:        212 22% 88%;
+  --popover:                224 42%  9%;
+  --popover-foreground:     212 22% 88%;
+  --border:                 220 24% 16%;   /* #1d2736 subtle divider */
+  --input:                  224 40% 11%;   /* #131a26 input bg       */
+  --primary:                168 100% 40%;  /* #00ccaa distinctive teal */
+  --primary-foreground:     224 50%  5%;   /* dark text on teal      */
+  --secondary:              224 36% 12%;   /* #16202e elevated card  */
+  --secondary-foreground:   212 22% 88%;
+  --muted:                  224 36% 10%;
+  --muted-foreground:       218 16% 52%;   /* #6d7e94 subdued        */
+  --accent:                 224 28% 18%;   /* #1d2b3c hover state    */
+  --accent-foreground:      212 22% 88%;
+  --destructive:              4 84% 60%;   /* #f16060 red            */
+  --destructive-foreground:   0  0% 98%;
+  --ring:                   168 100% 40%;
+  --radius:                 1rem;
 }
 
 * {
@@ -25,14 +34,125 @@ html,
 body {
   height: 100%;
   overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: smooth;
 }
 
 body {
   @apply bg-background text-foreground;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  font-family: var(--font-jakarta), 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-  background: hsl(var(--primary) / 0.35);
+  background: hsl(var(--primary) / 0.25);
   color: hsl(var(--foreground));
 }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.35); }
+
+/* ── Keyframes ── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1;   transform: scale(1);   }
+  50%       { opacity: 0.3; transform: scale(0.55); }
+}
+@keyframes glow-ring {
+  0%, 100% { box-shadow: 0 0 0  0px hsl(var(--primary) / 0.45); }
+  50%       { box-shadow: 0 0 0 18px hsl(var(--primary) / 0);   }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-7px); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ambient-glow {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50%       { opacity: 0.8; transform: scale(1.1); }
+}
+
+/* ── Animation classes ── */
+.animate-fade-up    { animation: fade-up    0.45s cubic-bezier(0.16,1,0.3,1) both; }
+.animate-fade-in    { animation: fade-in    0.2s  ease both; }
+.animate-pulse-dot  { animation: pulse-dot  1.8s  ease-in-out infinite; }
+.animate-glow-ring  { animation: glow-ring  3s    ease-in-out infinite; }
+.animate-float      { animation: float      3.2s  ease-in-out infinite; }
+.animate-slide-up   { animation: slide-up   0.3s  cubic-bezier(0.16,1,0.3,1) both; }
+/* Legacy aliases */
+.animate-primary-glow { animation: glow-ring 3s ease-in-out infinite; }
+.animate-amber-glow   { animation: glow-ring 3s ease-in-out infinite; }
+
+.stagger-1 { animation-delay: 0.07s; }
+.stagger-2 { animation-delay: 0.14s; }
+.stagger-3 { animation-delay: 0.21s; }
+.stagger-4 { animation-delay: 0.28s; }
+.stagger-5 { animation-delay: 0.35s; }
+
+/* ── Glass header / surface ── */
+.glass {
+  background: hsl(var(--card) / 0.80);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border-bottom: 1px solid hsl(var(--border) / 0.5);
+}
+
+.glass-panel {
+  background: hsl(var(--card) / 0.88);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+
+/* ── Ambient glow orb (decorative background element) ── */
+.glow-orb {
+  position: absolute;
+  border-radius: 50%;
+  background: hsl(var(--primary) / 0.12);
+  filter: blur(60px);
+  animation: ambient-glow 4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* ── Safe areas ── */
+.pt-safe { padding-top:    max(0px, env(safe-area-inset-top));    }
+.pb-safe { padding-bottom: max(0px, env(safe-area-inset-bottom)); }
+.pl-safe { padding-left:   max(0px, env(safe-area-inset-left));   }
+.pr-safe { padding-right:  max(0px, env(safe-area-inset-right));  }
+
+/* ── Touch feedback ── */
+@media (hover: none) and (pointer: coarse) {
+  .touch-active:active {
+    transform: scale(0.95);
+    transition: transform 0.08s ease;
+  }
+}
+
+/* ── Avatar palette (must be in source for Tailwind JIT) ── */
+.avatar-amber   { @apply bg-amber-500/15   text-amber-300   border-amber-500/25;   }
+.avatar-sky     { @apply bg-sky-500/15     text-sky-300     border-sky-500/25;     }
+.avatar-violet  { @apply bg-violet-500/15  text-violet-300  border-violet-500/25;  }
+.avatar-emerald { @apply bg-emerald-500/15 text-emerald-300 border-emerald-500/25; }
+.avatar-rose    { @apply bg-rose-500/15    text-rose-300    border-rose-500/25;    }
+.avatar-teal    { @apply bg-teal-500/15    text-teal-300    border-teal-500/25;    }
+.avatar-orange  { @apply bg-orange-500/15  text-orange-300  border-orange-500/25;  }
+
+/* ── Legacy neomorphism → flat equivalents (for any unreachable code) ── */
+.neo           { @apply bg-card; }
+.neo-sm        { @apply bg-card; }
+.neo-inset     { @apply bg-input/50; }
+.neo-btn       { @apply bg-secondary border border-border/40 hover:bg-accent transition-all; }
+.neo-btn-primary { @apply bg-primary text-primary-foreground hover:opacity-85 transition-all; }

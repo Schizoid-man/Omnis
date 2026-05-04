@@ -2,26 +2,30 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::{multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:6767";
 
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedConfig {
+  backend_url: Option<String>,
+  device_id: Option<String>,
+}
+
 struct OmnisState {
   backend_url: RwLock<String>,
   auth_token: RwLock<Option<String>>,
-  device_id: String,
+  device_id: RwLock<String>,
   client: Client,
+  config_path: RwLock<Option<PathBuf>>,
 }
 
 impl OmnisState {
   fn new() -> Result<Self, String> {
-    let device_id = Uuid::new_v4().to_string().to_lowercase();
     let client = Client::builder()
-      // The desktop app is constrained to localhost-only URLs. HTTPS remains
-      // supported for self-signed development certificates.
       .danger_accept_invalid_certs(true)
       .user_agent("omnis-desktop/0.1.0")
       .build()
@@ -30,8 +34,9 @@ impl OmnisState {
     Ok(Self {
       backend_url: RwLock::new(DEFAULT_BACKEND_URL.to_string()),
       auth_token: RwLock::new(None),
-      device_id,
+      device_id: RwLock::new(Uuid::new_v4().to_string().to_lowercase()),
       client,
+      config_path: RwLock::new(None),
     })
   }
 
@@ -43,13 +48,80 @@ impl OmnisState {
       .unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string())
   }
 
+  fn device_id(&self) -> String {
+    self
+      .device_id
+      .read()
+      .map(|g| g.clone())
+      .unwrap_or_else(|_| "unknown".to_string())
+  }
+
   fn set_backend_url(&self, url: String) -> Result<(), String> {
-    let mut guard = self
-      .backend_url
-      .write()
-      .map_err(|_| "failed to lock backend URL state".to_string())?;
-    *guard = url;
+    {
+      let mut guard = self
+        .backend_url
+        .write()
+        .map_err(|_| "failed to lock backend URL state".to_string())?;
+      *guard = url;
+    }
+    self.save_config();
     Ok(())
+  }
+
+  fn init_config(&self, config_dir: &Path) {
+    let config_path = config_dir.join("config.json");
+
+    if let Ok(contents) = std::fs::read_to_string(&config_path) {
+      if let Ok(persisted) = serde_json::from_str::<PersistedConfig>(&contents) {
+        if let Some(url) = persisted.backend_url.filter(|u| !u.is_empty()) {
+          if let Ok(mut guard) = self.backend_url.write() {
+            *guard = url;
+          }
+        }
+        if let Some(did) = persisted.device_id.filter(|d| !d.is_empty()) {
+          if let Ok(mut guard) = self.device_id.write() {
+            *guard = did;
+          }
+        }
+      }
+    } else {
+      self.save_config_to(&config_path);
+    }
+
+    if let Ok(mut guard) = self.config_path.write() {
+      *guard = Some(config_path);
+    }
+  }
+
+  fn save_config(&self) {
+    let path = self
+      .config_path
+      .read()
+      .ok()
+      .and_then(|g| g.clone());
+    if let Some(path) = path {
+      self.save_config_to(&path);
+    }
+  }
+
+  fn save_config_to(&self, path: &Path) {
+    let config = PersistedConfig {
+      backend_url: Some(self.backend_url()),
+      device_id: Some(self.device_id()),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&config) {
+      if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+      }
+      let _ = std::fs::write(path, json);
+    }
+  }
+
+  fn reset_config(&self) {
+    if let Ok(mut guard) = self.backend_url.write() {
+      *guard = DEFAULT_BACKEND_URL.to_string();
+    }
+    self.save_config();
   }
 
   fn token(&self) -> Result<Option<String>, String> {
@@ -83,10 +155,11 @@ fn validate_backend_url(url: &str) -> Result<(), String> {
   if parsed.scheme() != "https" && parsed.scheme() != "http" {
     return Err("backend URL must use http:// or https://".to_string());
   }
-  match parsed.host_str() {
-    Some("localhost") | Some("127.0.0.1") | Some("::1") => Ok(()),
-    _ => Err("backend URL must target localhost for this development build".to_string()),
+  if parsed.host_str().is_none() {
+    return Err("backend URL must include a host".to_string());
   }
+
+  Ok(())
 }
 
 fn with_auth_headers(
@@ -99,7 +172,7 @@ fn with_auth_headers(
   Ok(
     request
       .header("Authorization", format!("Bearer {token}"))
-      .header("X-Device-ID", &state.device_id),
+      .header("X-Device-ID", state.device_id()),
   )
 }
 
@@ -392,7 +465,7 @@ fn get_backend_config(state: State<'_, OmnisState>) -> Result<BackendConfig, Str
   let has_token = state.token()?.is_some();
   Ok(BackendConfig {
     backend_url: state.backend_url(),
-    device_id: state.device_id.clone(),
+    device_id: state.device_id(),
     has_token,
   })
 }
@@ -409,7 +482,7 @@ fn set_backend_url(state: State<'_, OmnisState>, url: String) -> Result<BackendC
 fn auth_runtime(state: State<'_, OmnisState>) -> Result<AuthRuntime, String> {
   Ok(AuthRuntime {
     backend_url: state.backend_url(),
-    device_id: state.device_id.clone(),
+    device_id: state.device_id(),
     token: state.token()?,
   })
 }
@@ -468,7 +541,7 @@ async fn auth_login(
   let login_resp = state
     .client
     .post(build_url(&base, "/auth/login"))
-    .header("X-Device-ID", &state.device_id)
+    .header("X-Device-ID", state.device_id())
     .json(&LoginRequest {
       username: &username,
       password: &password,
@@ -488,7 +561,7 @@ async fn auth_login(
     .client
     .get(build_url(&base, "/auth/me"))
     .header("Authorization", format!("Bearer {}", login.token))
-    .header("X-Device-ID", &state.device_id)
+    .header("X-Device-ID", state.device_id())
     .send()
     .await
     .map_err(|e| format!("me request failed: {e}"))?;
@@ -508,7 +581,7 @@ async fn auth_login(
 
   Ok(AuthSession {
     token: state.token()?.unwrap_or_default(),
-    device_id: state.device_id.clone(),
+    device_id: state.device_id(),
     user_id: me.id,
     username: me.username,
   })
@@ -558,7 +631,7 @@ async fn auth_logout(state: State<'_, OmnisState>) -> Result<(), String> {
     .client
     .post(build_url(&base, "/auth/logout"))
     .header("Authorization", format!("Bearer {token}"))
-    .header("X-Device-ID", &state.device_id)
+    .header("X-Device-ID", state.device_id())
     .send()
     .await
     .map_err(|e| format!("logout request failed: {e}"))?;
@@ -955,6 +1028,12 @@ async fn media_download(
   })
 }
 
+#[tauri::command]
+fn reset_config(state: State<'_, OmnisState>) -> Result<(), String> {
+  state.reset_config();
+  Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let state = OmnisState::new().expect("failed to initialize Omnis desktop state");
@@ -964,6 +1043,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       get_backend_config,
       set_backend_url,
+      reset_config,
       auth_runtime,
       backend_health,
       auth_login,
@@ -986,6 +1066,10 @@ pub fn run() {
       media_download
     ])
     .setup(|app| {
+      if let Ok(config_dir) = app.path().app_config_dir() {
+        let omnis_state = app.state::<OmnisState>();
+        omnis_state.init_config(&config_dir);
+      }
       app.handle().plugin(tauri_plugin_notification::init())?;
       if cfg!(debug_assertions) {
         app.handle().plugin(

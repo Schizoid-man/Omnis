@@ -2,7 +2,7 @@ type TauriWindow = Window & {
   __TAURI_INTERNALS__?: unknown
 }
 
-const DEFAULT_BACKEND_URL = 'http://127.0.0.1:6767'
+export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:6767'
 const STORAGE_KEY = 'omnis.browser.runtime'
 
 const PBKDF2_ITERATIONS = 100000
@@ -897,16 +897,12 @@ export async function getBackendConfig(): Promise<BackendConfig> {
 
 export async function setBackendUrl(url: string): Promise<BackendConfig> {
   if (isTauriRuntime()) {
-    try {
-      const native = await invokeTauri<BackendConfig>('set_backend_url', { url })
-      const merged = saveBrowserRuntime({ backendUrl: native.backendUrl, deviceId: native.deviceId })
-      return {
-        backendUrl: merged.backendUrl,
-        deviceId: merged.deviceId,
-        hasToken: Boolean(merged.token || native.hasToken),
-      }
-    } catch {
-      // fallback to local runtime
+    const native = await invokeTauri<BackendConfig>('set_backend_url', { url })
+    const merged = saveBrowserRuntime({ backendUrl: native.backendUrl, deviceId: native.deviceId })
+    return {
+      backendUrl: merged.backendUrl,
+      deviceId: merged.deviceId,
+      hasToken: Boolean(merged.token || native.hasToken),
     }
   }
 
@@ -916,6 +912,13 @@ export async function setBackendUrl(url: string): Promise<BackendConfig> {
     deviceId: runtime.deviceId,
     hasToken: Boolean(runtime.token),
   }
+}
+
+export async function resetConfig(): Promise<void> {
+  if (isTauriRuntime()) {
+    await invokeTauri<void>('reset_config')
+  }
+  saveBrowserRuntime({ backendUrl: DEFAULT_BACKEND_URL })
 }
 
 export async function authRuntime(): Promise<AuthRuntime> {
@@ -1102,6 +1105,10 @@ export async function chatSendMessage(chatId: number, input: SendMessageInput): 
     },
     true,
   )
+}
+
+export async function chatDeleteMessage(chatId: number, messageId: number): Promise<void> {
+  return requestJson<void>(`/chat/${chatId}/message/${messageId}`, { method: 'DELETE' }, true)
 }
 
 export async function callInitiate(chatId: number): Promise<CallInitiatePayload> {

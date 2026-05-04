@@ -1,0 +1,21 @@
+services:
+  android:
+    build:
+      context: .
+      dockerfile: Dockerfile.android
+    # Artifacts are copied out via the volume mount.
+    # The container exits after the build; volumes preserve the output.
+    volumes:
+      - ./out/android:/apk-out
+
+  macos:
+    build:
+      context: .
+      dockerfile: Dockerfile.macos
+      args:
+        # Change to match your SDK filename if different
+        MACOS_SDK_FILE: MacOSX14.0.sdk.tar.xz
+        # The darwin triple must match the SDK (14.0 → darwin23)
+        DARWIN_TRIPLE: x86_64-apple-darwin23
+    volumes:
+      - ./out/macos:/build

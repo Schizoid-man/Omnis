@@ -46,7 +46,9 @@ import {
   callHistory,
   callInitiate,
   chatCreate,
+  chatDeleteMessage,
   chatFetch,
+  DEFAULT_BACKEND_URL,
   chatList,
   chatSendMessage,
   connectCallWebSocket,
@@ -65,6 +67,7 @@ import {
   primeEpochKeys,
   resolveChatEpoch,
   requestMessageNotificationPermission,
+  resetConfig,
   setBackendUrl,
   unwrapCallKeyFromPeer,
   uploadChatMedia,
@@ -413,6 +416,28 @@ function attachmentFileName(attachment: MediaAttachment) {
   return `${fallback}.${extension.replace(/[^a-z0-9.-]/gi, '')}`
 }
 
+function getInitials(username: string) {
+  return username.slice(0, 2).toUpperCase()
+}
+
+const AVATAR_CLASSES = [
+  'avatar-amber',
+  'avatar-sky',
+  'avatar-violet',
+  'avatar-emerald',
+  'avatar-rose',
+  'avatar-teal',
+  'avatar-orange',
+]
+
+function usernameColorClass(username: string): string {
+  let hash = 0
+  for (let i = 0; i < username.length; i++) {
+    hash = ((hash << 5) - hash + username.charCodeAt(i)) | 0
+  }
+  return AVATAR_CLASSES[Math.abs(hash) % AVATAR_CLASSES.length]
+}
+
 function PendingAttachmentChip({
   file,
   onRemove,
@@ -438,20 +463,23 @@ function PendingAttachmentChip({
   }, [file, isImage])
 
   return (
-    <div className="flex items-center gap-2 rounded-md border border-border/80 bg-background/60 px-2 py-1 text-xs">
+    <div className="flex items-center gap-2.5 rounded-2xl border border-border/40 bg-secondary/70 px-2.5 py-2 animate-fade-in">
       {previewUrl ? (
-        <img src={previewUrl} alt={file.name} className="h-8 w-8 rounded object-cover" />
+        <img src={previewUrl} alt={file.name} className="h-10 w-10 rounded-xl object-cover shrink-0" />
       ) : (
-        <Paperclip className="h-3.5 w-3.5 text-muted-foreground" />
+        <div className="h-10 w-10 rounded-xl bg-accent/60 flex items-center justify-center shrink-0">
+          <Paperclip className="h-4 w-4 text-muted-foreground" />
+        </div>
       )}
-      <div className="min-w-0">
-        <p className="max-w-[160px] truncate text-foreground">{file.name}</p>
-        <p className="text-muted-foreground">{formatFileSize(file.size)}</p>
+      <div className="min-w-0 flex-1">
+        <p className="max-w-[150px] truncate text-sm font-medium text-foreground">{file.name}</p>
+        <p className="font-mono text-[11px] text-muted-foreground mt-0.5">{formatFileSize(file.size)}</p>
       </div>
       <button
         type="button"
-        className="text-muted-foreground transition hover:text-foreground"
+        className="h-7 w-7 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-all shrink-0"
         onClick={onRemove}
+        aria-label="Remove"
       >
         <X className="h-3.5 w-3.5" />
       </button>
@@ -487,6 +515,8 @@ export function OmnisDashboard() {
   const [draftMessage, setDraftMessage] = useState('')
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([])
   const [replyTarget, setReplyTarget] = useState<ViewMessage | null>(null)
+  const [expandedMessages, setExpandedMessages] = useState<Set<number>>(new Set())
+  const [openMenuMessageId, setOpenMenuMessageId] = useState<number | null>(null)
   const [attachmentDownloads, setAttachmentDownloads] = useState<Record<string, boolean>>({})
   const [attachmentPreviewLoading, setAttachmentPreviewLoading] = useState<Record<string, boolean>>({})
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null)
@@ -532,6 +562,7 @@ export function OmnisDashboard() {
   const callAudioMimeTypeRef = useRef('audio/webm;codecs=opus')
   const callAudioSeqRef = useRef(0)
   const callFirstAudioChunkRef = useRef(true)
+  const callAudioCaptureStartingRef = useRef(false)
   const callAudioStreamRef = useRef<MediaStream | null>(null)
   const callMediaRecorderRef = useRef<MediaRecorder | null>(null)
   const callPlaybackElementRef = useRef<HTMLAudioElement | null>(null)
@@ -878,6 +909,21 @@ export function OmnisDashboard() {
     setBehindMessages(0)
   }
 
+  function scrollToFirstUnread() {
+    const container = messageListRef.current
+    if (!container) return
+    if (unreadCount > 0) {
+      const messageNodes = container.querySelectorAll('[data-message-index]')
+      const targetIndex = messagesRef.current.length - unreadCount
+      const targetNode = messageNodes[targetIndex] as HTMLElement | undefined
+      if (targetNode) {
+        targetNode.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        return
+      }
+    }
+    scrollMessagesToBottom('smooth')
+  }
+
   function refreshBehindCount() {
     const behind = computeBehindCount()
     setBehindMessages(behind)
@@ -1020,6 +1066,22 @@ export function OmnisDashboard() {
     }
   }
 
+  async function handleDeleteMessage(message: ViewMessage) {
+    if (selectedChatId === null) return
+    setOpenMenuMessageId(null)
+    try {
+      await chatDeleteMessage(selectedChatId, message.id)
+      setMessages((prev) =>
+        prev.map((m) => (m.id === message.id ? { ...m, deleted: true, body: null } : m)),
+      )
+      messagesRef.current = messagesRef.current.map((m) =>
+        m.id === message.id ? { ...m, deleted: true, body: null } : m,
+      )
+    } catch (error) {
+      setStatus(`Failed to delete message: ${toErrorText(error)}`)
+    }
+  }
+
   function stopCallPingLoop() {
     if (callPingTimerRef.current !== null) {
       window.clearInterval(callPingTimerRef.current)
@@ -1036,6 +1098,7 @@ export function OmnisDashboard() {
     callKeyRef.current = null
     callAudioSeqRef.current = 0
     callFirstAudioChunkRef.current = true
+    callAudioCaptureStartingRef.current = false
     callQueuedFramesRef.current = []
     callCloseAfterFlushRef.current = false
   }
@@ -1213,6 +1276,9 @@ export function OmnisDashboard() {
     if (callMediaRecorderRef.current && callMediaRecorderRef.current.state !== 'inactive') {
       return
     }
+    if (callAudioCaptureStartingRef.current) {
+      return
+    }
     if (!callKeyRef.current) {
       return
     }
@@ -1220,7 +1286,14 @@ export function OmnisDashboard() {
       throw new Error('Audio capture is not available in this runtime')
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    callAudioCaptureStartingRef.current = true
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (error) {
+      callAudioCaptureStartingRef.current = false
+      throw error
+    }
     callAudioStreamRef.current = stream
 
     const mimeType = getSupportedCallAudioMimeType()
@@ -1291,6 +1364,7 @@ export function OmnisDashboard() {
     }
 
     recorder.start(100)
+    callAudioCaptureStartingRef.current = false
   }
 
   async function handleIncomingCallAudioFrame(frame: CallSocketFrame) {
@@ -1544,8 +1618,8 @@ export function OmnisDashboard() {
           if (current.direction === 'outgoing') {
             try {
               await startCallAudioCapture()
-            } catch {
-              // call can still continue if capture fails temporarily
+            } catch (error) {
+              setStatus(`Microphone error: ${toErrorText(error)}`)
             }
           }
           return
@@ -1661,6 +1735,11 @@ export function OmnisDashboard() {
       await openCallSocket(payload.call_id, activeChat.chat_id, 'outgoing', activeChat.with_user)
       setStatus(`Calling ${activeChat.with_user}...`)
     })
+
+    // If no call was established (e.g. 409 conflict), poll immediately to pick up an incoming call
+    if (!activeCallRef.current || activeCallRef.current.state === 'ended') {
+      void pollWorkspace()
+    }
   }
 
   async function onAcceptCall() {
@@ -2204,7 +2283,8 @@ export function OmnisDashboard() {
             notificationBaselineReadyRef.current &&
             Number(latest.sender_id) !== Number(signedInUser.id) &&
             alertsEnabledRef.current &&
-            !isChatMuted(chat.chat_id)
+            !isChatMuted(chat.chat_id) &&
+            chat.chat_id !== selectedChatIdRef.current
           if (shouldNotifyNewChat) {
             void notifyIncomingMessage(chat.with_user)
           }
@@ -2225,7 +2305,7 @@ export function OmnisDashboard() {
           (message) => message.id > previousLatestId && Number(message.sender_id) !== Number(signedInUser.id),
         )
 
-        if (hasIncomingSinceLastSeen && alertsEnabledRef.current && !isChatMuted(chat.chat_id)) {
+        if (hasIncomingSinceLastSeen && alertsEnabledRef.current && !isChatMuted(chat.chat_id) && chat.chat_id !== selectedChatIdRef.current) {
           void notifyIncomingMessage(chat.with_user)
         }
       }
@@ -2402,6 +2482,8 @@ export function OmnisDashboard() {
     await runTask(async () => {
       await authLogout()
       clearSavedCredentials()
+      await resetConfig()
+      window.localStorage.removeItem(VERIFIED_URL_KEY)
       lastSeenMessageIdByChatRef.current.clear()
       notificationBaselineReadyRef.current = false
       setNotificationsAllowed(null)
@@ -2529,545 +2611,623 @@ export function OmnisDashboard() {
 
   if (screen === 'boot') {
     return (
-      <Card className="mx-auto w-full max-w-lg border-border/80 bg-card/95">
-        <CardHeader>
-          <CardTitle>Preparing Omnis</CardTitle>
-          <CardDescription>Loading runtime and session state...</CardDescription>
-        </CardHeader>
-      </Card>
+      <div className="relative flex h-full items-center justify-center bg-background overflow-hidden">
+        {/* Ambient background glow */}
+        <div className="glow-orb w-80 h-80 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+        <div className="glow-orb w-48 h-48 top-1/4 left-1/3 opacity-60" style={{ animationDelay: '1.5s' }} />
+
+        <div className="relative z-10 flex flex-col items-center gap-10 animate-fade-up">
+          {/* Logo mark */}
+          <div className="relative">
+            <div className="absolute inset-0 rounded-2xl bg-primary/25 blur-2xl animate-float" />
+            <div className="relative h-20 w-20 rounded-2xl bg-primary flex items-center justify-center animate-glow-ring">
+              <MessageCircle className="h-9 w-9 text-primary-foreground" strokeWidth={1.75} />
+            </div>
+          </div>
+
+          {/* Brand */}
+          <div className="text-center space-y-2">
+            <h1 className="font-syne text-5xl font-black tracking-[0.24em] uppercase">OMNIS</h1>
+            <p className="font-mono text-[11px] text-muted-foreground/60 tracking-[0.35em] uppercase">Encrypted · Private</p>
+          </div>
+
+          {/* Loading indicator */}
+          <div className="flex items-center gap-2.5 stagger-3 animate-fade-up">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse-dot" />
+            <span className="font-mono text-xs text-muted-foreground/60 tracking-wide">Initializing secure runtime</span>
+          </div>
+        </div>
+      </div>
     )
   }
 
   if (screen === 'setup') {
     return (
-      <Card className="mx-auto w-full max-w-2xl border-border/80 bg-card/95">
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <PlugZap className="h-5 w-5 text-primary" />
-            <CardTitle className="text-xl">Step 1: Connect Backend</CardTitle>
+      <div className="relative flex h-full items-center justify-center bg-background p-6 overflow-hidden">
+        <div className="glow-orb w-64 h-64 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-60" />
+
+        <div className="relative z-10 w-full max-w-sm space-y-6 animate-fade-up">
+          {/* Header */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="h-8 w-8 rounded-xl bg-primary/15 border border-primary/25 flex items-center justify-center">
+                <PlugZap className="h-4 w-4 text-primary" strokeWidth={1.75} />
+              </div>
+              <span className="font-mono text-xs text-primary/70 tracking-[0.18em] uppercase font-medium">Step 1 of 2</span>
+            </div>
+            <h1 className="font-syne text-2xl font-bold">Connect to server</h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Enter your backend URL. Verified connections are remembered.
+            </p>
           </div>
-          <CardDescription>
-            Set your server URL and test connectivity. This step is skipped next time when the URL is already verified.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3">
-          <Input value={setupUrl} onChange={(event) => setSetupUrl(event.target.value)} placeholder="http://127.0.0.1:6767" />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled={busy} onClick={onTestSetup}>
-              <Server className="h-4 w-4" />
-              Save and Test URL
-            </Button>
-            {health ? (
-              <Badge variant="secondary">
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Connected • v{health.version}
-              </Badge>
-            ) : null}
-            <Badge variant={desktopRuntime ? 'default' : 'outline'}>{desktopRuntime ? 'Tauri Runtime' : 'Browser Runtime'}</Badge>
+
+          {/* Connection card */}
+          <div className="rounded-2xl border border-border/60 bg-card p-5 space-y-3">
+            <Input
+              value={setupUrl}
+              onChange={(event) => setSetupUrl(event.target.value)}
+              placeholder="http://127.0.0.1:6767"
+              className="h-12 font-mono text-sm rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                disabled={busy}
+                onClick={() => void onTestSetup()}
+                className="h-11 px-5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:opacity-85 active:scale-[0.98] transition-all disabled:opacity-40 flex items-center gap-2"
+              >
+                <Server className="h-4 w-4" strokeWidth={1.75} />
+                Test connection
+              </button>
+              {health ? (
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 text-xs text-emerald-400 font-medium">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  v{health.version}
+                </span>
+              ) : null}
+              <span className={cn('inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-mono border', desktopRuntime ? 'bg-primary/10 border-primary/20 text-primary/80' : 'bg-secondary border-border/40 text-muted-foreground')}>
+                {desktopRuntime ? 'Tauri' : 'Browser'}
+              </span>
+            </div>
           </div>
-          <div className="rounded-md border border-border/80 bg-secondary/50 px-3 py-2 text-sm text-muted-foreground">{status}</div>
-        </CardContent>
-      </Card>
+
+          {/* Status */}
+          <div className="rounded-xl border border-border/40 bg-muted/40 px-4 py-3 font-mono text-xs text-muted-foreground/80">
+            {status}
+          </div>
+        </div>
+      </div>
     )
   }
 
   if (screen === 'auth') {
     return (
-      <Card className="mx-auto w-full max-w-md border-border/80 bg-card/95">
-        <CardHeader>
-          <CardTitle className="text-xl">Step 2: Sign In</CardTitle>
-          <CardDescription>Login or create your account to enter chats.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4">
-          <div className="grid grid-cols-2 gap-2 rounded-md bg-background p-1">
-            <Button variant={authMode === 'login' ? 'default' : 'ghost'} size="sm" disabled={busy} onClick={() => setAuthMode('login')}>
-              <LogIn className="h-4 w-4" />
-              Login
-            </Button>
-            <Button variant={authMode === 'signup' ? 'default' : 'ghost'} size="sm" disabled={busy} onClick={() => setAuthMode('signup')}>
-              <UserPlus className="h-4 w-4" />
-              Sign Up
-            </Button>
+      <div className="relative flex h-full items-center justify-center bg-background p-6 overflow-hidden">
+        <div className="glow-orb w-72 h-72 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+
+        <div className="relative z-10 w-full max-w-xs space-y-7 animate-fade-up">
+          {/* Logo & brand */}
+          <div className="flex flex-col items-center gap-4">
+            <div className="relative">
+              <div className="absolute inset-0 rounded-2xl bg-primary/20 blur-xl animate-float" />
+              <div className="relative h-16 w-16 rounded-2xl bg-primary flex items-center justify-center animate-glow-ring">
+                <MessageCircle className="h-7 w-7 text-primary-foreground" strokeWidth={1.75} />
+              </div>
+            </div>
+            <div className="text-center">
+              <h1 className="font-syne text-3xl font-black tracking-[0.2em] uppercase">OMNIS</h1>
+              <p className="text-xs text-muted-foreground/60 mt-1 font-mono tracking-wider">End-to-end encrypted</p>
+            </div>
           </div>
 
-          {authMode === 'login' ? (
-            <div className="grid gap-3">
-              <Input value={loginUsername} onChange={(event) => setLoginUsername(event.target.value)} placeholder="Username" />
-              <Input
-                type="password"
-                value={loginPassword}
-                onChange={(event) => setLoginPassword(event.target.value)}
-                placeholder="Password"
-              />
-              <Button disabled={busy || !canLogin} onClick={onLogin}>
-                Login and Continue
-              </Button>
+          {/* Auth card */}
+          <div className="rounded-2xl border border-border/60 bg-card p-5 space-y-4">
+            {/* Tab switcher */}
+            <div className="grid grid-cols-2 gap-1 rounded-xl bg-muted/60 p-1">
+              <button
+                className={cn(
+                  'h-9 rounded-lg text-sm font-semibold transition-all',
+                  authMode === 'login'
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                disabled={busy}
+                onClick={() => setAuthMode('login')}
+              >
+                Login
+              </button>
+              <button
+                className={cn(
+                  'h-9 rounded-lg text-sm font-semibold transition-all',
+                  authMode === 'signup'
+                    ? 'bg-card text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                disabled={busy}
+                onClick={() => setAuthMode('signup')}
+              >
+                Sign up
+              </button>
             </div>
-          ) : (
-            <div className="grid gap-3">
-              <Input
-                value={signupUsername}
-                onChange={(event) => setSignupUsername(event.target.value)}
-                placeholder="Username (min 5 chars)"
-              />
-              <Input
-                type="password"
-                value={signupPassword}
-                onChange={(event) => setSignupPassword(event.target.value)}
-                placeholder="Password (min 6 chars)"
-              />
-              <Input
-                type="password"
-                value={signupConfirm}
-                onChange={(event) => setSignupConfirm(event.target.value)}
-                placeholder="Confirm password"
-              />
-              <Button disabled={busy || !canSignup} onClick={onSignup}>
-                Create Account and Continue
-              </Button>
-            </div>
-          )}
 
-          <div className="rounded-md border border-border/80 bg-secondary/50 px-3 py-2 text-sm text-muted-foreground">{status}</div>
-        </CardContent>
-      </Card>
+            {authMode === 'login' ? (
+              <div className="space-y-3">
+                <Input
+                  value={loginUsername}
+                  onChange={(event) => setLoginUsername(event.target.value)}
+                  placeholder="Username"
+                  className="h-12 rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+                  autoComplete="username"
+                />
+                <Input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  placeholder="Password"
+                  className="h-12 rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+                  autoComplete="current-password"
+                  onKeyDown={(e) => { if (e.key === 'Enter' && canLogin && !busy) void onLogin() }}
+                />
+                <button
+                  disabled={busy || !canLogin}
+                  onClick={() => void onLogin()}
+                  className="w-full h-12 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-35"
+                >
+                  Sign in
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <Input
+                  value={signupUsername}
+                  onChange={(event) => setSignupUsername(event.target.value)}
+                  placeholder="Username (min 5 chars)"
+                  className="h-12 rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+                  autoComplete="username"
+                />
+                <Input
+                  type="password"
+                  value={signupPassword}
+                  onChange={(event) => setSignupPassword(event.target.value)}
+                  placeholder="Password (min 6 chars)"
+                  className="h-12 rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+                  autoComplete="new-password"
+                />
+                <Input
+                  type="password"
+                  value={signupConfirm}
+                  onChange={(event) => setSignupConfirm(event.target.value)}
+                  placeholder="Confirm password"
+                  className="h-12 rounded-xl border-border/50 bg-input/60 focus-visible:ring-1 focus-visible:ring-primary/50 focus-visible:ring-offset-0"
+                  autoComplete="new-password"
+                />
+                <button
+                  disabled={busy || !canSignup}
+                  onClick={() => void onSignup()}
+                  className="w-full h-12 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-35"
+                >
+                  Create account
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Status */}
+          <p className="text-center font-mono text-xs text-muted-foreground/55">{status}</p>
+        </div>
+      </div>
     )
   }
 
   if (screen === 'settings') {
     return (
-      <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-card/95 px-3 py-2 text-xs text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-2">
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setScreen('chat')}>
-              <ArrowLeft className="h-4 w-4" />
-              Back to Chat
-            </Button>
-            <Badge variant="secondary">
-              <SlidersHorizontal className="h-3.5 w-3.5" />
-              Settings
-            </Badge>
+      <div className="flex h-full min-h-0 flex-col bg-background">
+        {/* Header */}
+        <header className="glass shrink-0 flex items-center justify-between px-4 py-3 pt-safe">
+          <div className="flex items-center gap-3">
+            <button
+              className="h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+              disabled={busy}
+              onClick={() => setScreen('chat')}
+              aria-label="Back"
+            >
+              <ArrowLeft className="h-5 w-5" strokeWidth={1.75} />
+            </button>
+            <h1 className="font-syne text-lg font-bold tracking-wide">Settings</h1>
           </div>
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="hidden truncate sm:block">{config?.backendUrl ?? runtime?.backendUrl ?? setupUrl}</span>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={onLogout}>
-              <LogOut className="h-4 w-4" />
-              Logout
-            </Button>
-          </div>
-        </div>
+          <button
+            className="flex h-9 items-center gap-1.5 rounded-xl px-3 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all disabled:opacity-40"
+            disabled={busy}
+            onClick={onLogout}
+          >
+            <LogOut className="h-4 w-4" strokeWidth={1.75} />
+            <span className="hidden sm:inline">Sign out</span>
+          </button>
+        </header>
 
-        <ScrollArea className="min-h-0 flex-1" viewportClassName="pr-2">
-          <div className="grid gap-3 md:grid-cols-2">
-          <Card className="border-border/80 bg-card/95">
-            <CardHeader>
-              <CardTitle className="text-base">Server Diagnostics</CardTitle>
-              <CardDescription>Check ping/pong and round-trip latency to your backend.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="rounded-md border border-border/80 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                Backend: {config?.backendUrl ?? runtime?.backendUrl ?? setupUrl}
+        <ScrollArea className="min-h-0 flex-1" viewportClassName="p-4 md:p-5">
+          <div className="max-w-2xl mx-auto space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
+
+            {/* Server diagnostics */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
+              <div>
+                <h2 className="font-semibold text-foreground">Server diagnostics</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Round-trip latency to your backend.</p>
               </div>
-              <Button disabled={busy} onClick={() => void runServerDiagnostics()}>
-                <Server className="h-4 w-4" />
-                Run Server Test
-              </Button>
+              <div className="rounded-xl bg-input/50 border border-border/40 px-3 py-2.5 font-mono text-xs text-muted-foreground/70 truncate">
+                {config?.backendUrl ?? runtime?.backendUrl ?? setupUrl}
+              </div>
+              <button
+                disabled={busy}
+                onClick={() => void runServerDiagnostics()}
+                className="w-full h-10 rounded-xl border border-border/40 bg-secondary/60 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+              >
+                <Activity className="h-4 w-4" strokeWidth={1.75} />
+                Run diagnostics
+              </button>
               {serverDiagnostics ? (
-                <div className="space-y-2 rounded-md border border-border/80 bg-background/60 px-3 py-2 text-xs">
-                  <p>
-                    Ping: <span className="text-foreground">{serverDiagnostics.pingValue}</span>
-                  </p>
-                  <p>
-                    Ping latency: <span className="text-foreground">{serverDiagnostics.pingLatencyMs}ms</span>
-                  </p>
-                  <p>
-                    Version: <span className="text-foreground">{serverDiagnostics.version}</span>
-                  </p>
-                  <p>
-                    Version latency: <span className="text-foreground">{serverDiagnostics.versionLatencyMs}ms</span>
-                  </p>
-                  <p className="text-muted-foreground">Checked at {serverDiagnostics.checkedAt}</p>
+                <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-3 font-mono text-xs space-y-2">
+                  <div className="flex justify-between"><span className="text-muted-foreground/60">Ping</span><span>{serverDiagnostics.pingValue}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground/60">Latency</span><span>{serverDiagnostics.pingLatencyMs}ms</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground/60">Version</span><span>{serverDiagnostics.version}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground/60">Ver. latency</span><span>{serverDiagnostics.versionLatencyMs}ms</span></div>
+                  <p className="text-muted-foreground/40 pt-1.5 border-t border-border/30">{serverDiagnostics.checkedAt}</p>
                 </div>
               ) : null}
-            </CardContent>
-          </Card>
+            </div>
 
-          <Card className="border-border/80 bg-card/95">
-            <CardHeader>
-              <CardTitle className="text-base">Alerts</CardTitle>
-              <CardDescription>Enable/disable desktop alerts and send a test notification.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant={alertsEnabled ? 'default' : 'secondary'}
+            {/* Notifications */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
+              <div>
+                <h2 className="font-semibold text-foreground">Notifications</h2>
+                <p className="text-xs text-muted-foreground/70 mt-0.5">Desktop alerts and per-chat muting.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className={cn('h-10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5',
+                    alertsEnabled
+                      ? 'bg-primary text-primary-foreground'
+                      : 'border border-border/40 bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-accent'
+                  )}
                   disabled={busy || alertsEnabled}
                   onClick={() => toggleAlerts(true)}
                 >
-                  <Bell className="h-4 w-4" />
-                  Enable Alerts
-                </Button>
-                <Button
-                  variant={!alertsEnabled ? 'default' : 'secondary'}
+                  <Bell className="h-4 w-4" strokeWidth={1.75} />
+                  Enable
+                </button>
+                <button
+                  className={cn('h-10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5',
+                    !alertsEnabled
+                      ? 'bg-primary text-primary-foreground'
+                      : 'border border-border/40 bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-accent'
+                  )}
                   disabled={busy || !alertsEnabled}
                   onClick={() => toggleAlerts(false)}
                 >
-                  <BellOff className="h-4 w-4" />
-                  Disable Alerts
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={busy || !alertsEnabled || notificationsAllowed !== true}
-                  onClick={() => void sendTestNotification()}
-                >
-                  <Bell className="h-4 w-4" />
-                  Test Alert
-                </Button>
+                  <BellOff className="h-4 w-4" strokeWidth={1.75} />
+                  Disable
+                </button>
               </div>
-              <div className="rounded-md border border-border/80 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                Alerts status: {alertsEnabled ? 'Enabled' : 'Disabled'}
-                {alertsEnabled ? ` • Permission: ${notificationsAllowed ? 'Granted' : 'Not granted'}` : ''}
+              <button
+                className="w-full h-10 rounded-xl border border-border/40 bg-secondary/60 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                disabled={busy || !alertsEnabled || notificationsAllowed !== true}
+                onClick={() => void sendTestNotification()}
+              >
+                <Bell className="h-3.5 w-3.5" strokeWidth={1.75} />
+                Send test alert
+              </button>
+              <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-2.5 font-mono text-xs text-muted-foreground/60">
+                {alertsEnabled ? (notificationsAllowed ? '● Alerts active' : '○ Permission needed') : '○ Alerts off'}
               </div>
-              <p className="text-xs text-muted-foreground">
-                Tip: Right-click any chat in the left sidebar to mute notifications for a custom duration.
-              </p>
-            </CardContent>
-          </Card>
+              <p className="text-xs text-muted-foreground/40">Right-click any chat to mute it temporarily.</p>
+            </div>
 
-          <Card className="border-border/80 bg-card/95 md:col-span-2">
-            <CardHeader>
-              <CardTitle className="text-base">Muted Chats</CardTitle>
-              <CardDescription>Active per-chat mute windows.</CardDescription>
-            </CardHeader>
-            <CardContent>
+            {/* Muted chats */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3 md:col-span-2">
+              <div>
+                <h2 className="font-semibold text-foreground">Muted chats</h2>
+                <p className="text-xs text-muted-foreground/70 mt-0.5">Active per-chat notification mutes.</p>
+              </div>
               {activeMutedChats.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted-foreground">
-                  No active chat mutes.
+                <div className="rounded-2xl border border-dashed border-border/40 px-4 py-8 text-center text-sm text-muted-foreground/55">
+                  No muted chats.
                 </div>
               ) : (
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="space-y-2 md:grid md:grid-cols-2 md:gap-2 md:space-y-0">
                   {activeMutedChats.map((entry) => (
-                    <div
-                      key={entry.chatId}
-                      className="flex items-center justify-between gap-2 rounded-md border border-border/80 bg-background/60 px-3 py-2"
-                    >
+                    <div key={entry.chatId} className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-secondary/50 px-3 py-3">
                       <div className="min-w-0">
-                        <p className="truncate text-sm text-foreground">{entry.username}</p>
-                        <p className="text-xs text-muted-foreground">
-                          Remaining: {formatDurationMinutes(entry.remainingMinutes)}
-                        </p>
+                        <p className="truncate text-sm font-medium text-foreground">{entry.username}</p>
+                        <p className="font-mono text-xs text-muted-foreground/55 mt-0.5">{formatDurationMinutes(entry.remainingMinutes)} remaining</p>
                       </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 px-2 text-xs"
+                      <button
+                        className="h-8 px-3 rounded-lg text-xs border border-border/40 text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
                         onClick={() => clearMute(entry.chatId)}
                       >
                         Unmute
-                      </Button>
+                      </button>
                     </div>
                   ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+
           </div>
         </ScrollArea>
 
-        <div className="rounded-md border border-border/80 bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
+        {/* Status bar */}
+        <div className="shrink-0 border-t border-border/30 bg-card/60 px-4 py-2.5 font-mono text-xs text-muted-foreground/55 truncate pb-safe">
           {status}
         </div>
       </div>
     )
   }
 
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-card/95 px-3 py-2 text-xs text-muted-foreground">
-        <div className="flex min-w-0 items-center gap-2">
-          <Badge variant={desktopRuntime ? 'default' : 'secondary'}>{desktopRuntime ? 'Tauri Runtime' : 'Browser Runtime'}</Badge>
-          <span className="truncate">{currentUser?.username ?? 'Unknown user'}</span>
-          <Badge variant={alertsEnabled ? 'secondary' : 'outline'}>{alertsEnabled ? 'Alerts On' : 'Alerts Off'}</Badge>
-        </div>
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="hidden truncate sm:block">{config?.backendUrl ?? runtime?.backendUrl ?? setupUrl}</span>
-          {alertsEnabled && notificationsAllowed === false ? (
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void requestNotificationPermission(true)}>
-              <Bell className="h-4 w-4" />
-              Enable Alerts
-            </Button>
-          ) : alertsEnabled && notificationsAllowed === true ? (
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void sendTestNotification()}>
-              <Bell className="h-4 w-4" />
-              Test Alert
-            </Button>
-          ) : null}
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setScreen('settings')}>
-            <Settings2 className="h-4 w-4" />
-            Settings
-          </Button>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={onLogout}>
-            <LogOut className="h-4 w-4" />
-            Logout
-          </Button>
-        </div>
-      </div>
+    <div className="flex h-full min-h-0 overflow-hidden bg-background">
 
-      <div className="min-h-0 flex flex-1 overflow-hidden rounded-xl border border-border/80 bg-card/95">
-        <aside className={cn('flex min-w-0 flex-col border-r border-border/80 md:w-[clamp(220px,24vw,340px)] md:min-w-[220px]', selectedChatId !== null && 'hidden md:flex')}>
-          <div className="flex items-center justify-between border-b border-border/80 px-4 py-3">
-            <h2 className="text-sm font-semibold text-foreground">Chats</h2>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void refreshWorkspace()}>
-              <Activity className="h-4 w-4" />
-            </Button>
-          </div>
+      {/* ── Sidebar ── */}
+      <aside className={cn(
+        'flex flex-col w-full md:w-[300px] lg:w-[320px] shrink-0 bg-card/40 border-r border-border/40',
+        selectedChatId !== null && 'hidden md:flex'
+      )}>
 
-          <div className="space-y-2 border-b border-border/80 p-3">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                className="pl-8"
-                value={chatSearch}
-                onChange={(event) => setChatSearch(event.target.value)}
-                placeholder="Search chats..."
-              />
+        {/* ── Brand bar ── */}
+        <div className="shrink-0 flex items-center justify-between px-4" style={{ paddingTop: 'max(16px, env(safe-area-inset-top))' }}>
+          <div className="flex items-center gap-2.5 py-3">
+            <div className="h-8 w-8 rounded-xl bg-primary flex items-center justify-center shrink-0 animate-glow-ring">
+              <MessageCircle className="h-3.5 w-3.5 text-primary-foreground" strokeWidth={2} />
             </div>
+            <span className="font-syne text-base font-bold tracking-[0.18em] uppercase">OMNIS</span>
+            <span className={cn('font-mono text-[9px] px-1.5 py-0.5 rounded-md border', desktopRuntime ? 'bg-primary/10 border-primary/20 text-primary/70' : 'bg-secondary border-border/40 text-muted-foreground/55')}>
+              {desktopRuntime ? 'Tauri' : 'Web'}
+            </span>
+          </div>
+          <div className="flex items-center gap-0.5">
+            {alertsEnabled && notificationsAllowed === false ? (
+              <button className="h-8 w-8 flex items-center justify-center rounded-xl text-amber-400 hover:bg-accent transition-all" disabled={busy} onClick={() => void requestNotificationPermission(true)} aria-label="Enable alerts">
+                <Bell className="h-4 w-4" strokeWidth={1.75} />
+              </button>
+            ) : alertsEnabled && notificationsAllowed === true ? (
+              <button className="h-8 w-8 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-all" disabled={busy} onClick={() => void sendTestNotification()} aria-label="Test notification">
+                <Bell className="h-4 w-4" strokeWidth={1.75} />
+              </button>
+            ) : null}
+            <button className="h-8 w-8 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-all" disabled={busy} onClick={() => setScreen('settings')} aria-label="Settings">
+              <Settings2 className="h-4 w-4" strokeWidth={1.75} />
+            </button>
+          </div>
+        </div>
 
-            <div className="flex items-center gap-2">
-              <Input
-                value={newChatUsername}
-                onChange={(event) => setNewChatUsername(event.target.value)}
-                placeholder="Username"
-              />
-              <Button
-                size="sm"
-                disabled={busy || newChatUsername.trim().length === 0}
-                onClick={onCreateChat}
-              >
-                <MessageSquarePlus className="h-4 w-4" />
-                Add
-              </Button>
+        {/* ── User profile card ── */}
+        {currentUser ? (
+          <div className="mx-3 mb-1 rounded-2xl border border-border/40 bg-secondary/40 px-3.5 py-3 flex items-center gap-3">
+            <div className={cn('h-10 w-10 rounded-full border-2 flex items-center justify-center text-sm font-bold shrink-0', usernameColorClass(currentUser.username))}>
+              {getInitials(currentUser.username)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold truncate">@{currentUser.username}</p>
+              <p className="font-mono text-[10px] text-muted-foreground/50 mt-0.5">
+                {health ? `v${health.version} · E2EE` : '○ connecting'}
+              </p>
+            </div>
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-accent transition-all" disabled={busy} onClick={() => void refreshWorkspace()} aria-label="Refresh">
+                <Activity className="h-3.5 w-3.5" strokeWidth={1.75} />
+              </button>
+              <button className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-all" disabled={busy} onClick={onLogout} aria-label="Sign out">
+                <LogOut className="h-3.5 w-3.5" strokeWidth={1.75} />
+              </button>
             </div>
           </div>
+        ) : null}
 
-          <ScrollArea className="min-h-0 flex-1" viewportClassName="p-2 pr-3">
-            {visibleChats.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border px-3 py-4 text-sm text-muted-foreground">
-                {chats.length === 0 ? 'No chats yet.' : 'No chats match your search.'}
+        {/* ── Search + new conversation ── */}
+        <div className="px-3 pt-2.5 pb-2 space-y-2 shrink-0">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/40" strokeWidth={2} />
+            <Input
+              className="pl-9 h-9 rounded-full border-border/30 bg-secondary/40 text-sm focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 placeholder:text-muted-foreground/40"
+              value={chatSearch}
+              onChange={(event) => setChatSearch(event.target.value)}
+              placeholder="Search..."
+            />
+          </div>
+          <div className="flex gap-2">
+            <Input
+              className="h-9 rounded-full flex-1 border-border/30 bg-secondary/40 text-sm focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 placeholder:text-muted-foreground/40"
+              value={newChatUsername}
+              onChange={(event) => setNewChatUsername(event.target.value)}
+              placeholder="New conversation..."
+              onKeyDown={(e) => { if (e.key === 'Enter' && newChatUsername.trim() && !busy) void onCreateChat() }}
+            />
+            <button
+              className="h-9 w-9 shrink-0 flex items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-85 active:scale-95 transition-all disabled:opacity-30 touch-active"
+              disabled={busy || newChatUsername.trim().length === 0}
+              onClick={onCreateChat}
+              aria-label="Start chat"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" strokeWidth={2} />
+            </button>
+          </div>
+        </div>
+
+        {/* ── Chat list ── */}
+        <ScrollArea className="min-h-0 flex-1" viewportClassName="px-3 pb-4">
+          {visibleChats.length === 0 ? (
+            <div className="mt-2 rounded-2xl border border-dashed border-border/30 px-4 py-10 text-center text-sm text-muted-foreground/50">
+              {chats.length === 0 ? 'No conversations yet.' : 'No results.'}
+            </div>
+          ) : (
+            <div className="space-y-px">
+              {visibleChats.map((chat) => {
+                const isSelected = chat.chat_id === selectedChatId
+                const mutedFor = muteLabel(chat.chat_id)
+                const colorClass = usernameColorClass(chat.with_user)
+                return (
+                  <button
+                    key={chat.chat_id}
+                    className={cn(
+                      'w-full flex items-center gap-3 rounded-2xl px-3 py-3 text-left transition-all touch-active',
+                      isSelected
+                        ? 'bg-primary/10 border border-primary/20'
+                        : 'hover:bg-accent/60 border border-transparent'
+                    )}
+                    onClick={() => setSelectedChatId(chat.chat_id)}
+                    onContextMenu={(event) => openChatMuteMenu(event, chat)}
+                  >
+                    <div className={cn('h-11 w-11 shrink-0 rounded-full border-2 flex items-center justify-center text-sm font-bold', colorClass)}>
+                      {getInitials(chat.with_user)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold leading-tight">{chat.with_user}</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/50 truncate mt-0.5">
+                        {mutedFor ? `muted · ${mutedFor}` : `chat #${chat.chat_id}`}
+                      </p>
+                    </div>
+                    {isSelected ? <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary animate-pulse-dot" /> : null}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </ScrollArea>
+      </aside>
+
+      {/* ── Chat section ── */}
+      <section className={cn('relative min-h-0 flex-1 flex-col bg-background', selectedChatId === null ? 'hidden md:flex' : 'flex')}>
+
+        {/* ── Chat header ── */}
+        <div className="glass shrink-0 flex items-center gap-3 px-4" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: '12px' }}>
+          <button
+            className="h-9 w-9 flex md:hidden items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent transition-all shrink-0"
+            onClick={() => setSelectedChatId(null)}
+            aria-label="Back"
+          >
+            <ArrowLeft className="h-5 w-5" strokeWidth={1.75} />
+          </button>
+          {activeChat ? (
+            <>
+              <div className={cn('h-10 w-10 shrink-0 rounded-full border-2 flex items-center justify-center text-sm font-bold', usernameColorClass(activeChat.with_user))}>
+                {getInitials(activeChat.with_user)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold leading-tight">{activeChat.with_user}</p>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary shrink-0" />
+                  <p className="font-mono text-[10px] text-muted-foreground/55 truncate">E2EE · chat #{activeChat.chat_id}</p>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1">
+              <p className="text-sm text-muted-foreground/50">Select a conversation</p>
+            </div>
+          )}
+          <button
+            className={cn('h-9 w-9 shrink-0 flex items-center justify-center rounded-xl transition-all',
+              busy || !activeChat || (activeCall !== null && activeCall.state !== 'ended')
+                ? 'opacity-25 cursor-not-allowed text-muted-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+            )}
+            disabled={busy || !activeChat || (activeCall !== null && activeCall.state !== 'ended')}
+            onClick={onStartCall}
+            aria-label="Start call"
+          >
+            <Phone className="h-[18px] w-[18px]" strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* Call banner */}
+        {activeCall && activeChat && activeCall.chatId === activeChat.chat_id ? (
+          <div className="shrink-0 px-3 pt-2 md:px-4">
+            <div className={cn('flex items-center justify-between gap-3 rounded-2xl border px-4 py-2.5',
+              activeCall.state === 'incoming' ? 'border-primary/30 bg-primary/10'
+                : activeCall.state === 'active' ? 'border-emerald-500/30 bg-emerald-500/10'
+                : 'border-border/40 bg-secondary/50'
+            )}>
+              <div className="flex min-w-0 items-center gap-2">
+                {activeCall.direction === 'incoming'
+                  ? <PhoneIncoming className="h-4 w-4 shrink-0 text-emerald-400" strokeWidth={1.75} />
+                  : <Phone className="h-4 w-4 shrink-0 text-emerald-400" strokeWidth={1.75} />}
+                <span className="text-sm truncate">{activeCall.statusText}</span>
+                {activeCall.rttMs !== null ? <span className="font-mono text-[11px] text-muted-foreground/60 shrink-0">· {activeCall.rttMs}ms</span> : null}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {activeCall.direction === 'incoming' && activeCall.state === 'incoming' ? (
+                  <>
+                    <button type="button" aria-label="Accept" className="h-9 w-9 flex items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-500 active:scale-95 transition-all touch-active" disabled={busy} onClick={() => void onAcceptCall()}>
+                      <Phone className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+                    <button type="button" aria-label="Reject" className="h-9 w-9 flex items-center justify-center rounded-full bg-destructive text-destructive-foreground hover:opacity-85 active:scale-95 transition-all touch-active" disabled={busy} onClick={() => void onRejectCall()}>
+                      <PhoneOff className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+                  </>
+                ) : null}
+                {activeCall.state !== 'ended' && !(activeCall.direction === 'incoming' && activeCall.state === 'incoming') ? (
+                  <button type="button" aria-label="End call" className="h-9 w-9 flex items-center justify-center rounded-full bg-destructive text-destructive-foreground hover:opacity-85 active:scale-95 transition-all touch-active" disabled={busy} onClick={() => void onEndCall()}>
+                    <PhoneOff className="h-4 w-4" strokeWidth={1.75} />
+                  </button>
+                ) : (
+                  <button type="button" className="h-9 px-3 rounded-xl text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all" disabled={busy} onClick={() => updateCallState(null)}>Dismiss</button>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Messages */}
+        <ScrollArea className="min-h-0 flex-1" viewportRef={messageListRef} viewportClassName="px-4 py-5 md:px-5" onViewportScroll={refreshBehindCount}>
+          <div className="flex w-full flex-col gap-1.5">
+            {showUnreadBanner ? (
+              <div className="mx-auto rounded-full border border-primary/25 bg-primary/10 px-4 py-1.5 text-xs text-foreground/75 text-center animate-fade-in">
+                {bannerUnreadCount} new message{bannerUnreadCount === 1 ? '' : 's'} while away
+              </div>
+            ) : null}
+            {unreadCount > 0 && behindMessages > 10 ? (
+              <div className="mx-auto rounded-full border border-primary/25 bg-primary/10 px-4 py-1.5 text-xs text-foreground/75 text-center">
+                {unreadCount} unread ↓
+              </div>
+            ) : null}
+            {activeChat === null ? (
+              <div className="flex flex-col items-center justify-center gap-5 py-24 text-center">
+                <div className="h-16 w-16 rounded-2xl border border-border/40 bg-card flex items-center justify-center">
+                  <MessageCircle className="h-7 w-7 text-muted-foreground/30" strokeWidth={1.5} />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-foreground/70">No conversation selected</p>
+                  <p className="text-xs text-muted-foreground/50">Choose a chat from the sidebar</p>
+                </div>
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-5 py-24 text-center">
+                <div className={cn('h-14 w-14 rounded-full border-2 flex items-center justify-center text-sm font-bold', usernameColorClass(activeChat.with_user))}>
+                  {getInitials(activeChat.with_user)}
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold">{activeChat.with_user}</p>
+                  <p className="text-xs text-muted-foreground/55">No messages yet. Say hello!</p>
+                </div>
               </div>
             ) : (
-              <div className="grid gap-1.5">
-                {visibleChats.map((chat) => {
-                  const isSelected = chat.chat_id === selectedChatId
-                  const mutedFor = muteLabel(chat.chat_id)
-                  return (
-                    <button
-                      key={chat.chat_id}
-                      className={cn(
-                        'rounded-md border px-3 py-2 text-left transition',
-                        isSelected
-                          ? 'border-primary/60 bg-primary/15 text-foreground'
-                          : 'border-border bg-background text-foreground hover:bg-secondary',
-                      )}
-                      onClick={() => setSelectedChatId(chat.chat_id)}
-                      onContextMenu={(event) => openChatMuteMenu(event, chat)}
-                    >
-                      <p className="truncate text-sm font-medium">{chat.with_user}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {mutedFor ? `Muted for ${mutedFor}` : `Chat #${chat.chat_id}`}
-                      </p>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </ScrollArea>
-
-          <div className="space-y-1 border-t border-border/80 p-3 text-xs text-muted-foreground">
-            <p className="truncate">Device: {config?.deviceId ?? runtime?.deviceId ?? 'n/a'}</p>
-            <p className="truncate">Health: {health ? `pong • v${health.version}` : 'not tested this session'}</p>
-          </div>
-        </aside>
-
-        <section className={cn('relative min-h-0 flex-1 flex-col', selectedChatId === null ? 'hidden md:flex' : 'flex')}>
-          <div className="flex items-center justify-between border-b border-border/80 bg-secondary/50 px-3 py-3 md:px-4">
-            <div className="flex min-w-0 items-center gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="md:hidden"
-                onClick={() => setSelectedChatId(null)}
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-foreground">
-                  {activeChat ? `Conversation with ${activeChat.with_user}` : 'Conversation'}
-                </p>
-                <p className="truncate text-xs text-muted-foreground">
-                  {activeChat ? `Chat #${activeChat.chat_id}` : 'Select a chat from the left panel'}
-                </p>
-              </div>
-            </div>
-            <Badge variant="secondary" className="hidden sm:inline-flex">
-              <MessageCircle className="h-3.5 w-3.5" />
-              E2EE
-            </Badge>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={busy || !activeChat || (activeCall !== null && activeCall.state !== 'ended')}
-                onClick={onStartCall}
-              >
-                <Phone className="h-4 w-4" />
-                Call
-              </Button>
-            </div>
-          </div>
-
-          {activeCall && activeChat && activeCall.chatId === activeChat.chat_id ? (
-            <div className="px-3 pt-2 text-xs md:px-4">
-              <div
-                className={cn(
-                  'flex items-center justify-between gap-3 rounded-full border px-3 py-2',
-                  activeCall.state === 'incoming'
-                    ? 'border-primary/60 bg-primary/10'
-                    : activeCall.state === 'active'
-                      ? 'border-emerald-500/40 bg-emerald-500/10'
-                      : 'border-border/80 bg-secondary/50',
-                )}
-              >
-                <div className="flex min-w-0 items-center gap-2 text-foreground">
-                  {activeCall.direction === 'incoming' ? (
-                    <PhoneIncoming className="h-4 w-4 text-emerald-500" />
-                  ) : (
-                    <Phone className="h-4 w-4 text-emerald-500" />
-                  )}
-                  <span className="truncate">{activeCall.statusText}</span>
-                  {activeCall.rttMs !== null ? (
-                    <span className="text-[10px] text-muted-foreground">· {activeCall.rttMs} ms</span>
-                  ) : null}
-                </div>
-
-                <div className="flex items-center gap-1">
-                  {activeCall.direction === 'incoming' && activeCall.state === 'incoming' ? (
-                    <>
-                      <button
-                        type="button"
-                        aria-label="Accept call"
-                        className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-500"
-                        disabled={busy}
-                        onClick={() => void onAcceptCall()}
-                      >
-                        <Phone className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Reject call"
-                        className="flex h-8 w-8 items-center justify-center rounded-full bg-rose-600 text-white transition hover:bg-rose-500"
-                        disabled={busy}
-                        onClick={() => void onRejectCall()}
-                      >
-                        <PhoneOff className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  ) : null}
-
-                  {activeCall.state !== 'ended' && !(activeCall.direction === 'incoming' && activeCall.state === 'incoming') ? (
-                    <button
-                      type="button"
-                      aria-label="End call"
-                      className="flex h-8 w-8 items-center justify-center rounded-full bg-rose-600 text-white transition hover:bg-rose-500"
-                      disabled={busy}
-                      onClick={() => void onEndCall()}
-                    >
-                      <PhoneOff className="h-3.5 w-3.5" />
-                    </button>
-                  ) : (
-                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => updateCallState(null)}>
-                      Dismiss
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          <ScrollArea
-            className="min-h-0 flex-1 bg-background/70"
-            viewportRef={messageListRef}
-            viewportClassName="px-3 py-4 pr-4 md:px-4"
-            onViewportScroll={refreshBehindCount}
-          >
-            <div className="flex w-full flex-col gap-2">
-              {showUnreadBanner ? (
-                <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-foreground">
-                  {bannerUnreadCount} new message{bannerUnreadCount === 1 ? '' : 's'} arrived while the app was inactive.
-                </div>
-              ) : null}
-              {unreadCount > 0 && behindMessages > 10 ? (
-                <div className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-xs text-foreground">
-                  {unreadCount} unread message{unreadCount === 1 ? '' : 's'} below.
-                </div>
-              ) : null}
-              {activeChat === null ? (
-                <div className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-                  Select or create a chat to begin messaging.
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-                  This chat has no messages yet.
-                </div>
-              ) : (
                 messages.map((message, index) => {
                   const isCallMessage = message.message_type === 'call'
                   const mine = currentUser !== null && message.sender_id === currentUser.id
                   const attachments = message.attachments ?? []
                   const hasAttachments = !message.deleted && attachments.length > 0
                   const hideBodyText = hasAttachments && (message.body ?? '').trim() === '📎'
-                  const repliedMessage =
-                    message.reply_id !== null && message.reply_id !== undefined
-                      ? messageById.get(message.reply_id) ?? null
-                      : null
+                  const repliedMessage = message.reply_id !== null && message.reply_id !== undefined ? messageById.get(message.reply_id) ?? null : null
 
                   if (!message.deleted && isCallMessage) {
                     const callDuration = formatCallDurationClock(message.duration_seconds)
-                    const callLabel =
-                      message.call_status === 'missed'
-                        ? 'Missed call'
-                        : message.call_status === 'rejected'
-                          ? 'Call declined'
-                          : message.call_status === 'ended'
-                            ? (callDuration ? `Call ended · ${callDuration}` : 'Call ended')
-                            : message.call_status === 'accepted'
-                              ? (callDuration ? `Call completed · ${callDuration}` : 'Call completed')
-                              : 'Call'
-
-                    const Icon =
-                      message.call_status === 'missed'
-                        ? PhoneMissed
-                        : message.call_status === 'rejected'
-                          ? PhoneOff
-                          : Phone
-
-                    const iconTone =
-                      message.call_status === 'missed'
-                        ? 'text-amber-400'
-                        : message.call_status === 'rejected'
-                          ? 'text-rose-500'
-                          : 'text-emerald-500'
-
+                    const callLabel = message.call_status === 'missed' ? 'Missed call' : message.call_status === 'rejected' ? 'Call declined' : message.call_status === 'ended' ? (callDuration ? `Call ended · ${callDuration}` : 'Call ended') : message.call_status === 'accepted' ? (callDuration ? `Call completed · ${callDuration}` : 'Call completed') : 'Call'
+                    const Icon = message.call_status === 'missed' ? PhoneMissed : message.call_status === 'rejected' ? PhoneOff : Phone
+                    const iconTone = message.call_status === 'missed' ? 'text-amber-400' : message.call_status === 'rejected' ? 'text-destructive' : 'text-emerald-400'
                     return (
-                      <div
-                        key={message.id}
-                        data-message-index={index}
-                        className="mx-auto flex w-fit max-w-[70%] items-center gap-1 rounded-[10px] border border-border/80 bg-transparent px-3 py-1 text-xs text-muted-foreground"
-                      >
-                        <Icon className={cn('h-3.5 w-3.5', iconTone)} />
+                      <div key={message.id} data-message-index={index} className="mx-auto flex w-fit max-w-[80%] items-center gap-2 rounded-full border border-border/40 bg-secondary/60 px-4 py-2 text-xs text-muted-foreground">
+                        <Icon className={cn('h-3.5 w-3.5 shrink-0', iconTone)} />
                         <span>{callLabel}</span>
-                        <span className="ml-1 text-[11px]">{formatMessageTime(message.created_at)}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground/50">{formatMessageTime(message.created_at)}</span>
                       </div>
                     )
                   }
@@ -3076,36 +3236,34 @@ export function OmnisDashboard() {
                     <div
                       key={message.id}
                       data-message-index={index}
-                      className={cn(
-                        'max-w-[85%] rounded-xl border px-3 py-2 text-sm shadow-sm',
-                        mine
-                          ? 'ml-auto border-primary/40 bg-primary/15 text-foreground'
-                          : 'mr-auto border-border bg-secondary/60 text-foreground',
-                      )}
+                      className={cn('group relative max-w-[82%] sm:max-w-[70%] rounded-3xl px-3.5 py-2.5 text-sm', mine ? 'ml-auto bg-primary text-primary-foreground rounded-tr-sm' : 'mr-auto bg-card border border-border/50 text-foreground rounded-tl-sm')}
+                      onContextMenu={(e) => { e.preventDefault(); setOpenMenuMessageId(message.id) }}
                     >
-                      <p className="mb-1 text-[11px] text-muted-foreground">
-                        #{message.id} • {formatMessageTime(message.created_at)}
-                      </p>
                       {!message.deleted && message.reply_id ? (
-                        <div className="mb-2 rounded-md border border-border/70 bg-background/40 px-2 py-1.5 text-xs">
-                          <p className="font-medium text-muted-foreground">
+                        <div className={cn('mb-2 rounded-xl px-2.5 py-2 text-xs border-l-2', mine ? 'bg-primary-foreground/10 border-primary-foreground/40' : 'bg-background/40 border-primary/50')}>
+                          <p className={cn('font-semibold text-[11px]', mine ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
                             {repliedMessage ? senderLabel(repliedMessage.sender_id) : 'Original message'}
                           </p>
-                          <p className="mt-0.5 truncate text-muted-foreground">
-                            {repliedMessage
-                              ? repliedMessage.attachments.length > 0 && (repliedMessage.body ?? '').trim() === '📎'
-                                ? `[Attachment] ${repliedMessage.attachments.length} file${repliedMessage.attachments.length === 1 ? '' : 's'}`
-                                : previewText(repliedMessage.deleted ? 'Message deleted' : repliedMessage.body)
-                              : '[Original message unavailable]'}
+                          <p className={cn('mt-0.5 truncate', mine ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
+                            {repliedMessage ? repliedMessage.attachments.length > 0 && (repliedMessage.body ?? '').trim() === '📎' ? `[Attachment] ${repliedMessage.attachments.length} file${repliedMessage.attachments.length === 1 ? '' : 's'}` : previewText(repliedMessage.deleted ? 'Message deleted' : repliedMessage.body) : '[Original unavailable]'}
                           </p>
                         </div>
                       ) : null}
                       {message.deleted ? (
-                        <p className="whitespace-pre-wrap break-words">
-                          <span className="italic text-muted-foreground">Message deleted</span>
-                        </p>
+                        <p className={cn('italic text-xs', mine ? 'text-primary-foreground/60' : 'text-muted-foreground')}>Message deleted</p>
                       ) : !hideBodyText ? (
-                        <p className="whitespace-pre-wrap break-words">{message.body ?? '[Decryption failed]'}</p>
+                        <>
+                          <p style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }} className="whitespace-pre-wrap leading-relaxed">
+                            {(message.body ?? '[Decryption failed]').length > 300 && !expandedMessages.has(message.id)
+                              ? (message.body ?? '[Decryption failed]').slice(0, 300) + '…'
+                              : (message.body ?? '[Decryption failed]')}
+                          </p>
+                          {(message.body ?? '[Decryption failed]').length > 300 ? (
+                            <button type="button" className={cn('mt-1 text-[11px] hover:underline', mine ? 'text-primary-foreground/60' : 'text-primary')} onClick={() => setExpandedMessages((prev) => { const next = new Set(prev); if (next.has(message.id)) next.delete(message.id); else next.add(message.id); return next })}>
+                              {expandedMessages.has(message.id) ? 'Show less' : 'Show more'}
+                            </button>
+                          ) : null}
+                        </>
                       ) : null}
                       {hasAttachments ? (
                         <div className="mt-2 space-y-1.5">
@@ -3115,64 +3273,45 @@ export function OmnisDashboard() {
                             const previewing = Boolean(attachmentPreviewLoading[key])
                             const isImage = (attachment.mime_type || '').toLowerCase().startsWith('image/')
                             return (
-                              <div
-                                key={key}
-                                className="flex items-center justify-between gap-2 rounded-md border border-border/70 bg-background/40 px-2 py-1.5"
-                              >
+                              <div key={key} className={cn('flex items-center justify-between gap-2 rounded-xl px-3 py-2', mine ? 'bg-primary-foreground/10 border border-primary-foreground/20' : 'bg-background/50 border border-border/40')}>
                                 <div className="min-w-0">
-                                  <p className="truncate text-[11px] font-medium text-foreground">
-                                    {attachment.mime_type || 'application/octet-stream'}
-                                  </p>
-                                  <p className="truncate text-[11px] text-muted-foreground">
-                                    {attachmentFileName(attachment)} • {formatFileSize(attachment.total_size)} • {attachment.total_chunks} chunk
-                                    {attachment.total_chunks === 1 ? '' : 's'}
-                                  </p>
+                                  <p className={cn('truncate font-mono text-[11px] font-medium', mine ? 'text-primary-foreground/80' : 'text-foreground')}>{attachment.mime_type || 'application/octet-stream'}</p>
+                                  <p className={cn('truncate font-mono text-[11px] mt-0.5', mine ? 'text-primary-foreground/55' : 'text-muted-foreground')}>{attachmentFileName(attachment)} · {formatFileSize(attachment.total_size)}</p>
                                 </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2 text-[11px]"
-                                  disabled={busy || downloading}
-                                  onClick={() => void handleDownloadAttachment(message, attachment)}
-                                >
-                                  <Download className="h-3.5 w-3.5" />
-                                  {downloading ? '...' : 'Download'}
-                                </Button>
-                                {isImage ? (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-7 px-2 text-[11px]"
-                                    disabled={busy || previewing}
-                                    onClick={() => void handlePreviewAttachment(message, attachment)}
-                                  >
-                                    <Eye className="h-3.5 w-3.5" />
-                                    {previewing ? '...' : 'Preview'}
-                                  </Button>
-                                ) : null}
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button type="button" className={cn('h-8 px-2 rounded-lg text-[11px] transition-colors flex items-center gap-1', mine ? 'bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/25' : 'bg-accent text-muted-foreground hover:text-foreground')} disabled={busy || downloading} onClick={() => void handleDownloadAttachment(message, attachment)}>
+                                    <Download className="h-3.5 w-3.5" />
+                                    {downloading ? '…' : 'Save'}
+                                  </button>
+                                  {isImage ? (
+                                    <button type="button" className={cn('h-8 px-2 rounded-lg text-[11px] transition-colors flex items-center gap-1', mine ? 'bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/25' : 'bg-accent text-muted-foreground hover:text-foreground')} disabled={busy || previewing} onClick={() => void handlePreviewAttachment(message, attachment)}>
+                                      <Eye className="h-3.5 w-3.5" />
+                                      {previewing ? '…' : 'View'}
+                                    </button>
+                                  ) : null}
+                                </div>
                               </div>
                             )
                           })}
                         </div>
                       ) : null}
-                      {!message.deleted && message.message_type !== 'call' ? (
-                        <div className="mt-2 flex justify-end">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 px-2 text-[11px]"
-                            onClick={() => {
-                              setReplyTarget(message)
-                              messageInputRef.current?.focus()
-                            }}
-                          >
-                            <CornerUpLeft className="h-3.5 w-3.5" />
-                            Reply
-                          </Button>
-                        </div>
+                      <p className={cn('mt-1.5 font-mono text-[10px] text-right', mine ? 'text-primary-foreground/50' : 'text-muted-foreground/55')}>
+                        {formatMessageTime(message.created_at)}
+                      </p>
+                      {openMenuMessageId === message.id ? (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setOpenMenuMessageId(null)} />
+                          <div className={cn('absolute top-0 z-50 w-40 rounded-2xl border border-border/50 bg-card/95 p-1.5 shadow-xl backdrop-blur-xl', mine ? 'right-0' : 'left-0')}>
+                            {!message.deleted && message.message_type !== 'call' ? (
+                              <button type="button" className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm hover:bg-accent transition-colors" onClick={() => { setReplyTarget(message); messageInputRef.current?.focus(); setOpenMenuMessageId(null) }}>
+                                <CornerUpLeft className="h-3.5 w-3.5 text-muted-foreground" />Reply
+                              </button>
+                            ) : null}
+                            {!message.deleted && mine ? (
+                              <button type="button" className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm text-destructive hover:bg-accent transition-colors" onClick={() => void handleDeleteMessage(message)}>Delete</button>
+                            ) : null}
+                          </div>
+                        </>
                       ) : null}
                     </div>
                   )
@@ -3181,223 +3320,119 @@ export function OmnisDashboard() {
             </div>
           </ScrollArea>
 
-          {unreadCount > 0 && behindMessages > 10 ? (
-            <div className="pointer-events-none absolute bottom-24 right-4 z-10 md:bottom-28 md:right-6">
-              <Button
-                type="button"
-                className="pointer-events-auto rounded-full shadow"
-                onClick={() => scrollMessagesToBottom('smooth')}
-              >
-                <ChevronDown className="h-4 w-4" />
-                {unreadCount}
-              </Button>
+          {/* Scroll-to-bottom FAB */}
+          {behindMessages > 0 ? (
+            <div className="pointer-events-none absolute bottom-24 right-4 z-10 md:bottom-28 md:right-5">
+              <button type="button" className="pointer-events-auto relative h-11 w-11 flex items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg hover:bg-primary/85 transition-colors touch-active animate-fade-in" onClick={scrollToFirstUnread} aria-label="Scroll to unread">
+                <ChevronDown className="h-5 w-5" />
+                {unreadCount > 0 ? (
+                  <span className="absolute -top-1 -right-1 h-5 min-w-5 px-1 rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center">
+                    {unreadCount}
+                  </span>
+                ) : null}
+              </button>
             </div>
           ) : null}
 
-          <div className="border-t border-border/80 bg-secondary/50 p-3 md:p-4">
+          {/* Composer */}
+          <div className="glass shrink-0 border-t border-border/30 px-3 py-3 md:px-4 pb-safe">
             <div className="flex w-full flex-col gap-2">
-              <input
-                ref={attachmentInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={handleAttachmentSelection}
-              />
+              <input ref={attachmentInputRef} type="file" multiple className="hidden" onChange={handleAttachmentSelection} />
               {replyTarget ? (
-                <div className="flex items-start justify-between gap-2 rounded-md border border-border/80 bg-background/60 px-3 py-2">
+                <div className="flex items-start justify-between gap-2 rounded-2xl border border-border/50 bg-secondary/60 px-3.5 py-2.5 animate-fade-in">
                   <div className="min-w-0">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      Replying to {senderLabel(replyTarget.sender_id)}
-                    </p>
-                    <p className="truncate text-xs text-foreground">
-                      {replyTarget.attachments.length > 0 && (replyTarget.body ?? '').trim() === '📎'
-                        ? `[Attachment] ${replyTarget.attachments.length} file${replyTarget.attachments.length === 1 ? '' : 's'}`
-                        : previewText(replyTarget.deleted ? 'Message deleted' : replyTarget.body, 180)}
+                    <p className="text-[11px] font-semibold text-primary">Replying to {senderLabel(replyTarget.sender_id)}</p>
+                    <p className="truncate text-xs text-muted-foreground mt-0.5">
+                      {replyTarget.attachments.length > 0 && (replyTarget.body ?? '').trim() === '📎' ? `[Attachment] ${replyTarget.attachments.length} file${replyTarget.attachments.length === 1 ? '' : 's'}` : previewText(replyTarget.deleted ? 'Message deleted' : replyTarget.body, 180)}
                     </p>
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => setReplyTarget(null)}
-                  >
-                    Cancel
-                  </Button>
+                  <button type="button" className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0" onClick={() => setReplyTarget(null)} aria-label="Cancel reply">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               ) : null}
               {pendingAttachments.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {pendingAttachments.map((file, index) => (
-                    <PendingAttachmentChip
-                      key={`${file.name}-${file.size}-${index}`}
-                      file={file}
-                      onRemove={() => removePendingAttachment(index)}
-                    />
+                    <PendingAttachmentChip key={`${file.name}-${file.size}-${index}`} file={file} onRemove={() => removePendingAttachment(index)} />
                   ))}
                 </div>
               ) : null}
               <div className="flex items-end gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="shrink-0"
-                  disabled={busy || selectedChatId === null}
-                  onClick={() => attachmentInputRef.current?.click()}
-                >
-                  <Paperclip className="h-4 w-4" />
-                </Button>
+                <button type="button" className="h-11 w-11 shrink-0 flex items-center justify-center rounded-full bg-secondary/60 border border-border/40 text-muted-foreground hover:text-primary hover:bg-accent disabled:opacity-40 transition-all touch-active" disabled={busy || selectedChatId === null} onClick={() => attachmentInputRef.current?.click()} aria-label="Attach file">
+                  <Paperclip className="h-[18px] w-[18px]" />
+                </button>
                 <Textarea
                   ref={messageInputRef}
                   rows={1}
-                  className="min-h-10 max-h-44 resize-none leading-5"
+                  className="min-h-[44px] max-h-44 flex-1 resize-none rounded-3xl border border-border/40 bg-secondary/50 focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 leading-5 px-4 py-3 text-sm"
                   value={draftMessage}
                   disabled={busy || selectedChatId === null}
-                  onChange={(event) => {
-                    setDraftMessage(event.target.value)
-                    resizeComposerInput(event.target)
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                      event.preventDefault()
-                      void onSendMessage()
-                    }
-                  }}
-                  placeholder={selectedChatId === null ? 'Select a chat first' : 'Type a message...'}
+                  onChange={(event) => { setDraftMessage(event.target.value); resizeComposerInput(event.target) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void onSendMessage() } }}
+                  placeholder={selectedChatId === null ? 'Select a chat first' : 'Message...'}
                 />
-                <Button
-                  className="shrink-0"
-                  disabled={
-                    busy ||
-                    selectedChatId === null ||
-                    (draftMessage.trim().length === 0 && pendingAttachments.length === 0)
-                  }
+                <button
+                  type="button"
+                  className={cn('h-11 w-11 shrink-0 flex items-center justify-center rounded-full transition-all touch-active', busy || selectedChatId === null || (draftMessage.trim().length === 0 && pendingAttachments.length === 0) ? 'bg-secondary/50 border border-border/40 text-muted-foreground/30 cursor-not-allowed' : 'bg-primary text-primary-foreground hover:opacity-85 active:scale-95')}
+                  disabled={busy || selectedChatId === null || (draftMessage.trim().length === 0 && pendingAttachments.length === 0)}
                   onClick={onSendMessage}
+                  aria-label="Send"
                 >
-                  <Send className="h-4 w-4" />
-                  <span className="hidden sm:inline">Send</span>
-                </Button>
+                  <Send className="h-[18px] w-[18px]" />
+                </button>
               </div>
-              <p className="truncate text-xs text-muted-foreground">{status}</p>
+              <p className="font-mono text-[11px] text-muted-foreground/50 truncate px-1">{status}</p>
             </div>
           </div>
         </section>
-      </div>
 
+      {/* ── Mute menu ── */}
       {chatMuteMenu ? (
-        <div
-          className="fixed inset-0 z-40"
-          onClick={() => setChatMuteMenu(null)}
-          onContextMenu={(event) => event.preventDefault()}
-        >
-          <div
-            className="fixed z-50 w-[260px] rounded-lg border border-border/80 bg-card p-3 shadow-lg"
-            style={{ left: chatMuteMenu.x, top: chatMuteMenu.y }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <p className="truncate text-sm font-medium text-foreground">Mute {chatMuteMenu.username}</p>
-            <p className="mt-1 text-xs text-muted-foreground">Disable alerts for this chat for a selected duration.</p>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <Button size="sm" variant="secondary" className="h-8 text-xs" onClick={() => applyChatMuteFromMenu(15)}>
-                15m
-              </Button>
-              <Button size="sm" variant="secondary" className="h-8 text-xs" onClick={() => applyChatMuteFromMenu(60)}>
-                1h
-              </Button>
-              <Button size="sm" variant="secondary" className="h-8 text-xs" onClick={() => applyChatMuteFromMenu(480)}>
-                8h
-              </Button>
-              <Button size="sm" variant="secondary" className="h-8 text-xs" onClick={() => applyChatMuteFromMenu(1440)}>
-                24h
-              </Button>
+        <div className="fixed inset-0 z-40" onClick={() => setChatMuteMenu(null)} onContextMenu={(event) => event.preventDefault()}>
+          <div className="fixed z-50 w-[272px] rounded-2xl border border-border/60 bg-card/95 p-4 shadow-2xl backdrop-blur-xl animate-fade-in" style={{ left: chatMuteMenu.x, top: chatMuteMenu.y }} onClick={(event) => event.stopPropagation()}>
+            <p className="truncate text-sm font-semibold text-foreground">Mute {chatMuteMenu.username}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Silence notifications for a duration.</p>
+            <div className="mt-4 grid grid-cols-4 gap-2">
+              <button className="h-9 rounded-xl bg-secondary border border-border/40 text-xs font-medium text-foreground hover:bg-accent transition-colors touch-active" onClick={() => applyChatMuteFromMenu(15)}>15m</button>
+              <button className="h-9 rounded-xl bg-secondary border border-border/40 text-xs font-medium text-foreground hover:bg-accent transition-colors touch-active" onClick={() => applyChatMuteFromMenu(60)}>1h</button>
+              <button className="h-9 rounded-xl bg-secondary border border-border/40 text-xs font-medium text-foreground hover:bg-accent transition-colors touch-active" onClick={() => applyChatMuteFromMenu(480)}>8h</button>
+              <button className="h-9 rounded-xl bg-secondary border border-border/40 text-xs font-medium text-foreground hover:bg-accent transition-colors touch-active" onClick={() => applyChatMuteFromMenu(1440)}>24h</button>
             </div>
-
             <div className="mt-3 flex items-center gap-2">
-              <Input
-                value={chatMuteMenu.customMinutes}
-                onChange={(event) =>
-                  setChatMuteMenu((previous) =>
-                    previous
-                      ? {
-                          ...previous,
-                          customMinutes: event.target.value.replace(/[^0-9]/g, ''),
-                        }
-                      : previous,
-                  )
-                }
-                placeholder="Minutes"
-              />
-              <Button
-                size="sm"
-                className="h-9"
-                onClick={() => {
-                  const parsedMinutes = Number.parseInt(chatMuteMenu.customMinutes || '0', 10)
-                  if (!Number.isFinite(parsedMinutes) || parsedMinutes <= 0) {
-                    setStatus('Mute duration must be at least 1 minute.')
-                    return
-                  }
-                  applyChatMuteFromMenu(parsedMinutes)
-                }}
-              >
+              <Input value={chatMuteMenu.customMinutes} onChange={(event) => setChatMuteMenu((previous) => previous ? { ...previous, customMinutes: event.target.value.replace(/[^0-9]/g, '') } : previous)} placeholder="Minutes" className="h-10 rounded-xl text-sm" />
+              <button className="h-10 w-10 shrink-0 flex items-center justify-center rounded-xl bg-primary text-primary-foreground hover:bg-primary/85 transition-colors touch-active" onClick={() => { const m = Number.parseInt(chatMuteMenu.customMinutes || '0', 10); if (!Number.isFinite(m) || m <= 0) { setStatus('Duration must be at least 1 minute.'); return }; applyChatMuteFromMenu(m) }}>
                 <Clock3 className="h-4 w-4" />
-                Apply
-              </Button>
+              </button>
             </div>
-
-            <div className="mt-3 flex items-center justify-between gap-2">
-              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={removeChatMuteFromMenu}>
-                Unmute
-              </Button>
-              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setChatMuteMenu(null)}>
-                Close
-              </Button>
+            <div className="mt-3 flex items-center justify-between gap-2 pt-3 border-t border-border/40">
+              <button className="h-9 px-3 rounded-xl text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" onClick={removeChatMuteFromMenu}>Unmute</button>
+              <button className="h-9 px-3 rounded-xl text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" onClick={() => setChatMuteMenu(null)}>Close</button>
             </div>
           </div>
         </div>
       ) : null}
 
+      {/* ── Image preview ── */}
       {attachmentPreview ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={closeAttachmentPreview}
-        >
-          <div
-            className="flex max-h-[92vh] w-full max-w-4xl flex-col gap-3 rounded-xl border border-border/80 bg-card p-3"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-center justify-between gap-2">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in" onClick={closeAttachmentPreview}>
+          <div className="flex max-h-[94vh] w-full max-w-4xl flex-col gap-3 rounded-3xl border border-border/50 bg-card/95 p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-foreground">{attachmentPreview.fileName}</p>
-                <p className="text-xs text-muted-foreground">{attachmentPreview.mimeType}</p>
+                <p className="truncate text-sm font-semibold text-foreground">{attachmentPreview.fileName}</p>
+                <p className="font-mono text-xs text-muted-foreground">{attachmentPreview.mimeType}</p>
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    const anchor = document.createElement('a')
-                    anchor.href = attachmentPreview.objectUrl
-                    anchor.download = attachmentPreview.fileName
-                    document.body.appendChild(anchor)
-                    anchor.click()
-                    anchor.remove()
-                  }}
-                >
-                  <Download className="h-4 w-4" />
-                  Download
-                </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={closeAttachmentPreview}>
-                  <X className="h-4 w-4" />
-                </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button type="button" className="h-9 px-4 flex items-center gap-2 rounded-xl bg-secondary border border-border/50 text-sm hover:bg-accent transition-colors" onClick={() => { const a = document.createElement('a'); a.href = attachmentPreview.objectUrl; a.download = attachmentPreview.fileName; document.body.appendChild(a); a.click(); a.remove() }}>
+                  <Download className="h-4 w-4" />Download
+                </button>
+                <button type="button" className="h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" onClick={closeAttachmentPreview} aria-label="Close">
+                  <X className="h-5 w-5" />
+                </button>
               </div>
             </div>
-            <div className="flex min-h-[240px] flex-1 items-center justify-center overflow-auto rounded-md border border-border/70 bg-background/60 p-2">
-              <img
-                src={attachmentPreview.objectUrl}
-                alt={attachmentPreview.fileName}
-                className="max-h-[78vh] w-auto max-w-full object-contain"
-              />
+            <div className="flex min-h-[200px] flex-1 items-center justify-center overflow-auto rounded-2xl border border-border/40 bg-background/60 p-3">
+              <img src={attachmentPreview.objectUrl} alt={attachmentPreview.fileName} className="max-h-[78vh] w-auto max-w-full object-contain rounded-xl" />
             </div>
           </div>
         </div>
@@ -3405,3 +3440,4 @@ export function OmnisDashboard() {
     </div>
   )
 }
+

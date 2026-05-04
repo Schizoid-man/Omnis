@@ -4,6 +4,26 @@ Thumbs.db
 
 # Build artifacts (omnis-tui)
 omnis-tui/target/
+omnis-tui/out/
+omnis-tui/web/dist/
+omnis-tui/web/tsconfig.tsbuildinfo
+
+# macOS SDK tarball (proprietary — must be provided locally, never committed)
+omnis-tui/sdk/*.tar.xz
+omnis-tui/sdk/*.tar.gz
+
+# Firebase config — must be placed manually before Android builds
+**/google-services.json
 
 # Node / Expo (omnis-tui is Rust, but just in case)
 node_modules/
+
+# Tooling / IDE / temp
+.claude/
+.vscode/
+.playwright-mcp/
+.agents/
+omnis-tui/web/.superpowers/
+skills-lock.json
+temp-job-log.zip
+artifacts/

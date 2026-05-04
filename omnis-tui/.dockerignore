@@ -1,0 +1,21 @@
+# Rust build caches — largest directories, must be excluded
+target/
+src-tauri/target/
+
+# Android build artifacts and symlinks into target/ that Docker can't follow
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/
+
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/dist/
+web/out/
+
+# Docker build outputs
+out/
+
+# macOS SDK (never commit, not needed for Android)
+sdk/

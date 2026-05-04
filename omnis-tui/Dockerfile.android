@@ -1,0 +1,87 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# Use US mirror — archive.ubuntu.com is under a DDoS attack (May 2026).
+# Keep HTTP; Ubuntu packages are GPG-signed so HTTP is safe for apt.
+# HTTPS would require ca-certificates first (chicken-and-egg in a fresh image).
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com|http://us.archive.ubuntu.com|g' \
+    /etc/apt/sources.list
+
+# ── System deps ──────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget unzip git \
+    openjdk-17-jdk \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 20 ───────────────────────────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Android SDK ──────────────────────────────────────────────────────────────
+ENV ANDROID_SDK_ROOT=/android-sdk
+ENV ANDROID_HOME=/android-sdk
+ENV NDK_VERSION=26.1.10909125
+ENV NDK_HOME=/android-sdk/ndk/${NDK_VERSION}
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH=${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}
+
+RUN mkdir -p /android-sdk/cmdline-tools && \
+    wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+         -O /tmp/cmdline-tools.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d /android-sdk/cmdline-tools && \
+    mv /android-sdk/cmdline-tools/cmdline-tools /android-sdk/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+
+# Accept all licenses, install SDK platform + NDK
+RUN yes | sdkmanager --licenses > /dev/null 2>&1 || true && \
+    sdkmanager \
+        "platform-tools" \
+        "platforms;android-36" \
+        "build-tools;35.0.0" \
+        "ndk;${NDK_VERSION}"
+
+# ── Bun (required by generated BuildTask.kt which hardcodes /root/.bun/bin/bun) ─
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH=/root/.bun/bin:${PATH}
+
+# ── Rust + Android targets ────────────────────────────────────────────────────
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:${PATH}
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --profile minimal && \
+    rustup target add \
+        aarch64-linux-android \
+        armv7-linux-androideabi \
+        x86_64-linux-android \
+        i686-linux-android
+
+# ── App source ───────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . .
+
+# Create local.properties so Gradle finds the Android SDK
+RUN echo "sdk.dir=${ANDROID_HOME}" > /app/src-tauri/gen/android/local.properties
+
+# Install frontend dependencies
+# Delete the Windows-generated lock file so npm resolves optional deps for Linux.
+# package-lock.json from Windows locks in cli-win32-x64-msvc; Linux needs cli-linux-x64-gnu.
+RUN rm -f web/package-lock.json && npm --prefix web install
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+# tauri android build regenerates tauri.settings.gradle with current cargo paths
+RUN npm --prefix web run tauri android build -- --apk
+
+# Output: src-tauri/gen/android/app/build/outputs/apk/
+# On container start, copy built APKs to the volume-mounted /apk-out so the host can read them.
+# (The build path is baked into the image; the volume would shadow it if mounted directly.)
+CMD ["sh", "-c", "cp -r /app/src-tauri/gen/android/app/build/outputs/apk/. /apk-out/ && echo 'APK written to ./out/android'"]
