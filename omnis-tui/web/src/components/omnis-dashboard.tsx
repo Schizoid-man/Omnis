@@ -14,6 +14,7 @@ import {
   Eye,
   LogIn,
   LogOut,
+  Menu,
   MessageCircle,
   MessageSquarePlus,
   Paperclip,
@@ -71,6 +72,11 @@ import {
   setBackendUrl,
   unwrapCallKeyFromPeer,
   uploadChatMedia,
+  userSessionsList,
+  userSessionsRevoke,
+  userSessionsRevokeOther,
+  fcmUnregisterToken,
+  registerFcmIfAndroid,
   type AuthRuntime,
   type BackendConfig,
   type CallHistoryEntry,
@@ -78,6 +84,7 @@ import {
   type ChatSummary,
   type HealthResponse,
   type MediaAttachment,
+  type UserSession,
 } from '@/lib/omnis'
 import { cn } from '@/lib/utils'
 
@@ -492,6 +499,7 @@ export function OmnisDashboard() {
   const [status, setStatus] = useState('Booting Omnis...')
   const [busy, setBusy] = useState(false)
   const [desktopRuntime, setDesktopRuntime] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
 
   const [config, setConfig] = useState<BackendConfig | null>(null)
   const [runtime, setRuntime] = useState<AuthRuntime | null>(null)
@@ -529,6 +537,12 @@ export function OmnisDashboard() {
   const [mutedChats, setMutedChats] = useState<Record<string, number>>(() => readMutedChats())
   const [chatMuteMenu, setChatMuteMenu] = useState<ChatMuteMenuState | null>(null)
   const [serverDiagnostics, setServerDiagnostics] = useState<ServerDiagnostics | null>(null)
+  const [sessions, setSessions] = useState<UserSession[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [micTestActive, setMicTestActive] = useState(false)
+  const [micLevel, setMicLevel] = useState(0)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const micAnimFrameRef = useRef<number | null>(null)
   const [activeCall, setActiveCall] = useState<ActiveCallState | null>(null)
 
   const lastSeenMessageIdByChatRef = useRef(new Map<number, number>())
@@ -629,6 +643,7 @@ export function OmnisDashboard() {
 
   useEffect(() => {
     selectedChatIdRef.current = selectedChatId
+    setDrawerOpen(false)
     setReplyTarget(null)
     setPendingAttachments([])
     setAttachmentDownloads({})
@@ -664,6 +679,12 @@ export function OmnisDashboard() {
     alertsEnabledRef.current = alertsEnabled
     writeAlertsEnabled(alertsEnabled)
   }, [alertsEnabled])
+
+  useEffect(() => {
+    if (screen !== 'settings') {
+      stopMicTest()
+    }
+  }, [screen])
 
   useEffect(() => {
     mutedChatsRef.current = mutedChats
@@ -2013,6 +2034,85 @@ export function OmnisDashboard() {
     })
   }
 
+  async function loadSessions() {
+    setSessionsLoading(true)
+    try {
+      const list = await userSessionsList()
+      setSessions(list)
+    } catch (error) {
+      setStatus(toErrorText(error))
+    } finally {
+      setSessionsLoading(false)
+    }
+  }
+
+  async function onRevokeSession(sessionId: number) {
+    await runTask(async () => {
+      await userSessionsRevoke(sessionId)
+      setStatus('Session revoked.')
+      await loadSessions()
+    })
+  }
+
+  async function onRevokeOtherSessions() {
+    await runTask(async () => {
+      await userSessionsRevokeOther()
+      setStatus('All other sessions revoked.')
+      await loadSessions()
+    })
+  }
+
+  function clearLocalData() {
+    if (typeof window === 'undefined') return
+    window.localStorage.clear()
+    setStatus('Local data cleared. Please restart the app.')
+    setScreen('setup')
+  }
+
+  async function runMicTest() {
+    if (micTestActive) {
+      stopMicTest()
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      micStreamRef.current = stream
+      setMicTestActive(true)
+
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      const data = new Uint8Array(analyser.frequencyBinCount)
+
+      const tick = () => {
+        analyser.getByteFrequencyData(data)
+        const avg = data.reduce((s, v) => s + v, 0) / data.length
+        setMicLevel(Math.min(100, Math.round((avg / 128) * 100)))
+        micAnimFrameRef.current = requestAnimationFrame(tick)
+      }
+      tick()
+    } catch {
+      setStatus('Microphone access denied or unavailable.')
+    }
+  }
+
+  function stopMicTest() {
+    if (micAnimFrameRef.current !== null) {
+      cancelAnimationFrame(micAnimFrameRef.current)
+      micAnimFrameRef.current = null
+    }
+    if (micStreamRef.current) {
+      for (const track of micStreamRef.current.getTracks()) {
+        track.stop()
+      }
+      micStreamRef.current = null
+    }
+    setMicTestActive(false)
+    setMicLevel(0)
+  }
+
   async function refreshRuntime() {
     const [nextConfig, nextRuntime] = await Promise.all([getBackendConfig(), authRuntime()])
     setConfig(nextConfig)
@@ -2182,6 +2282,7 @@ export function OmnisDashboard() {
         { id: session.userId, username: session.username },
         `Signed in automatically as ${session.username}.`,
       )
+      void registerFcmIfAndroid()
       return true
     } catch {
       clearSavedCredentials()
@@ -2448,13 +2549,23 @@ export function OmnisDashboard() {
     await runTask(async () => {
       const username = loginUsername.trim()
       const password = loginPassword
-      const session = await authLogin(username, password)
+      let session
+      try {
+        session = await authLogin(username, password)
+      } catch (error) {
+        const msg = toErrorText(error)
+        if (msg.includes('429') || msg.toLowerCase().includes('too many')) {
+          throw new Error('Too many failed attempts. Please wait a few minutes and try again.')
+        }
+        throw error
+      }
       writeSavedCredentials({ username, password })
       setCurrentUser({ id: session.userId, username: session.username })
       setLoginPassword('')
       setScreen('chat')
       setStatus(`Logged in as ${session.username}.`)
       await loadChats(true)
+      void registerFcmIfAndroid()
     })
   }
 
@@ -2475,12 +2586,20 @@ export function OmnisDashboard() {
       setScreen('chat')
       setStatus(`Account created. Welcome, ${session.username}.`)
       await loadChats(true)
+      void registerFcmIfAndroid()
     })
   }
 
   async function onLogout() {
     await runTask(async () => {
       await authLogout()
+      if (isTauriRuntime()) {
+        try {
+          await fcmUnregisterToken()
+        } catch {
+          // best effort
+        }
+      }
       clearSavedCredentials()
       await resetConfig()
       window.localStorage.removeItem(VERIFIED_URL_KEY)
@@ -2705,6 +2824,16 @@ export function OmnisDashboard() {
         <div className="glow-orb w-72 h-72 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
 
         <div className="relative z-10 w-full max-w-xs space-y-7 animate-fade-up">
+          {/* Back to setup */}
+          <button
+            className="self-start flex items-center gap-1.5 text-xs text-muted-foreground/60 hover:text-foreground transition-colors mb-2"
+            onClick={() => setScreen('setup')}
+            disabled={busy}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
+            Change server
+          </button>
+
           {/* Logo & brand */}
           <div className="flex flex-col items-center gap-4">
             <div className="relative">
@@ -2827,43 +2956,66 @@ export function OmnisDashboard() {
             <button
               className="h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
               disabled={busy}
-              onClick={() => setScreen('chat')}
+              onClick={() => { stopMicTest(); setScreen('chat') }}
               aria-label="Back"
             >
               <ArrowLeft className="h-5 w-5" strokeWidth={1.75} />
             </button>
             <h1 className="font-syne text-lg font-bold tracking-wide">Settings</h1>
           </div>
-          <button
-            className="flex h-9 items-center gap-1.5 rounded-xl px-3 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all disabled:opacity-40"
-            disabled={busy}
-            onClick={onLogout}
-          >
-            <LogOut className="h-4 w-4" strokeWidth={1.75} />
-            <span className="hidden sm:inline">Sign out</span>
-          </button>
         </header>
 
-        <ScrollArea className="min-h-0 flex-1" viewportClassName="p-4 md:p-5">
-          <div className="max-w-2xl mx-auto space-y-3 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
+        <ScrollArea className="min-h-0 flex-1" viewportClassName="p-4 space-y-3">
+          <div className="max-w-2xl mx-auto space-y-3">
 
-            {/* Server diagnostics */}
+            {/* ── ACCOUNT ── */}
             <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
-              <div>
-                <h2 className="font-semibold text-foreground">Server diagnostics</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">Round-trip latency to your backend.</p>
-              </div>
+              <h2 className="text-xs font-semibold tracking-[0.14em] uppercase text-muted-foreground/60">Account</h2>
+              {currentUser ? (
+                <div className="flex items-center gap-3 rounded-xl bg-secondary/40 px-3.5 py-3">
+                  <div className={cn('h-10 w-10 rounded-full border-2 flex items-center justify-center text-sm font-bold shrink-0', usernameColorClass(currentUser.username))}>
+                    {getInitials(currentUser.username)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold truncate">@{currentUser.username}</p>
+                    <p className="font-mono text-[10px] text-muted-foreground/50 mt-0.5">Signed in</p>
+                  </div>
+                </div>
+              ) : null}
+              <button
+                className="w-full h-10 rounded-xl border border-destructive/30 bg-destructive/5 text-sm text-destructive hover:bg-destructive/10 transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                disabled={busy}
+                onClick={onLogout}
+              >
+                <LogOut className="h-4 w-4" strokeWidth={1.75} />
+                Sign out
+              </button>
+            </div>
+
+            {/* ── SERVER ── */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
+              <h2 className="text-xs font-semibold tracking-[0.14em] uppercase text-muted-foreground/60">Server</h2>
               <div className="rounded-xl bg-input/50 border border-border/40 px-3 py-2.5 font-mono text-xs text-muted-foreground/70 truncate">
                 {config?.backendUrl ?? runtime?.backendUrl ?? setupUrl}
               </div>
-              <button
-                disabled={busy}
-                onClick={() => void runServerDiagnostics()}
-                className="w-full h-10 rounded-xl border border-border/40 bg-secondary/60 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all flex items-center justify-center gap-2 disabled:opacity-40"
-              >
-                <Activity className="h-4 w-4" strokeWidth={1.75} />
-                Run diagnostics
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  disabled={busy}
+                  onClick={() => { stopMicTest(); setScreen('setup') }}
+                  className="h-10 rounded-xl border border-border/40 bg-secondary/60 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                >
+                  <Server className="h-4 w-4" strokeWidth={1.75} />
+                  Edit URL
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => void runServerDiagnostics()}
+                  className="h-10 rounded-xl border border-border/40 bg-secondary/60 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                >
+                  <Activity className="h-4 w-4" strokeWidth={1.75} />
+                  Diagnostics
+                </button>
+              </div>
               {serverDiagnostics ? (
                 <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-3 font-mono text-xs space-y-2">
                   <div className="flex justify-between"><span className="text-muted-foreground/60">Ping</span><span>{serverDiagnostics.pingValue}</span></div>
@@ -2875,12 +3027,9 @@ export function OmnisDashboard() {
               ) : null}
             </div>
 
-            {/* Notifications */}
+            {/* ── NOTIFICATIONS ── */}
             <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
-              <div>
-                <h2 className="font-semibold text-foreground">Notifications</h2>
-                <p className="text-xs text-muted-foreground/70 mt-0.5">Desktop alerts and per-chat muting.</p>
-              </div>
+              <h2 className="text-xs font-semibold tracking-[0.14em] uppercase text-muted-foreground/60">Notifications</h2>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   className={cn('h-10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5',
@@ -2918,29 +3067,17 @@ export function OmnisDashboard() {
               <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-2.5 font-mono text-xs text-muted-foreground/60">
                 {alertsEnabled ? (notificationsAllowed ? '● Alerts active' : '○ Permission needed') : '○ Alerts off'}
               </div>
-              <p className="text-xs text-muted-foreground/40">Right-click any chat to mute it temporarily.</p>
-            </div>
-
-            {/* Muted chats */}
-            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3 md:col-span-2">
-              <div>
-                <h2 className="font-semibold text-foreground">Muted chats</h2>
-                <p className="text-xs text-muted-foreground/70 mt-0.5">Active per-chat notification mutes.</p>
-              </div>
-              {activeMutedChats.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border/40 px-4 py-8 text-center text-sm text-muted-foreground/55">
-                  No muted chats.
-                </div>
-              ) : (
-                <div className="space-y-2 md:grid md:grid-cols-2 md:gap-2 md:space-y-0">
+              {activeMutedChats.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground/50 font-medium">Muted chats</p>
                   {activeMutedChats.map((entry) => (
-                    <div key={entry.chatId} className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-secondary/50 px-3 py-3">
+                    <div key={entry.chatId} className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-secondary/50 px-3 py-2.5">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-foreground">{entry.username}</p>
                         <p className="font-mono text-xs text-muted-foreground/55 mt-0.5">{formatDurationMinutes(entry.remainingMinutes)} remaining</p>
                       </div>
                       <button
-                        className="h-8 px-3 rounded-lg text-xs border border-border/40 text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+                        className="h-7 px-3 rounded-lg text-xs border border-border/40 text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
                         onClick={() => clearMute(entry.chatId)}
                       >
                         Unmute
@@ -2948,7 +3085,125 @@ export function OmnisDashboard() {
                     </div>
                   ))}
                 </div>
-              )}
+              ) : null}
+            </div>
+
+            {/* ── PRIVACY & SECURITY ── */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
+              <h2 className="text-xs font-semibold tracking-[0.14em] uppercase text-muted-foreground/60">Privacy &amp; Security</h2>
+              <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-3 font-mono text-xs space-y-1.5">
+                <div className="flex justify-between"><span className="text-muted-foreground/60">Encryption</span><span>E2EE</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground/60">Key exchange</span><span>P-384 ECDH</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground/60">Cipher</span><span>AES-256-GCM</span></div>
+              </div>
+
+              {/* Sessions */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-muted-foreground/50 font-medium">Active sessions</p>
+                  <button
+                    className="text-xs text-primary/70 hover:text-primary transition-colors"
+                    disabled={sessionsLoading}
+                    onClick={() => void loadSessions()}
+                  >
+                    {sessionsLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+                {sessions.length === 0 && !sessionsLoading ? (
+                  <div className="rounded-xl border border-dashed border-border/40 px-4 py-6 text-center text-xs text-muted-foreground/50">
+                    Tap Refresh to load sessions.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {sessions.map((session) => (
+                      <div key={session.id} className="flex items-start justify-between gap-3 rounded-xl border border-border/40 bg-secondary/50 px-3 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-mono text-xs text-foreground truncate">{session.device_id.slice(0, 12)}…</p>
+                            {session.current ? (
+                              <span className="rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary/80">current</span>
+                            ) : null}
+                          </div>
+                          <p className="font-mono text-[10px] text-muted-foreground/50 mt-0.5">
+                            Last seen {new Date(session.last_accessed).toLocaleDateString()}
+                          </p>
+                          {session.user_agent ? (
+                            <p className="text-[10px] text-muted-foreground/40 mt-0.5 truncate">{session.user_agent}</p>
+                          ) : null}
+                        </div>
+                        {!session.current ? (
+                          <button
+                            className="h-7 shrink-0 px-2.5 rounded-lg text-xs border border-destructive/25 text-destructive/70 hover:bg-destructive/10 transition-all"
+                            disabled={busy}
+                            onClick={() => void onRevokeSession(session.id)}
+                          >
+                            Revoke
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                    {sessions.some((s) => !s.current) ? (
+                      <button
+                        className="w-full h-9 rounded-xl border border-destructive/25 bg-destructive/5 text-xs text-destructive/80 hover:bg-destructive/10 transition-all"
+                        disabled={busy}
+                        onClick={() => void onRevokeOtherSessions()}
+                      >
+                        Revoke all other sessions
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+
+              <button
+                className="w-full h-10 rounded-xl border border-destructive/30 bg-destructive/5 text-sm text-destructive/80 hover:bg-destructive/10 transition-all flex items-center justify-center gap-2"
+                onClick={clearLocalData}
+              >
+                <X className="h-4 w-4" strokeWidth={1.75} />
+                Clear local data
+              </button>
+            </div>
+
+            {/* ── APP ── */}
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3">
+              <h2 className="text-xs font-semibold tracking-[0.14em] uppercase text-muted-foreground/60">App</h2>
+              <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-2.5 font-mono text-xs flex justify-between">
+                <span className="text-muted-foreground/60">Version</span>
+                <span>{health?.version ?? '—'}</span>
+              </div>
+              <div className="rounded-xl bg-input/40 border border-border/30 px-3 py-2.5 font-mono text-xs flex justify-between">
+                <span className="text-muted-foreground/60">Runtime</span>
+                <span>{desktopRuntime ? 'Tauri' : 'Browser'}</span>
+              </div>
+
+              {/* Mic test */}
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground/50 font-medium">Microphone test</p>
+                <button
+                  className={cn('w-full h-10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2',
+                    micTestActive
+                      ? 'bg-destructive/10 border border-destructive/30 text-destructive'
+                      : 'border border-border/40 bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-accent'
+                  )}
+                  onClick={() => void runMicTest()}
+                >
+                  {micTestActive ? 'Stop mic test' : 'Start mic test'}
+                </button>
+                {micTestActive ? (
+                  <div className="rounded-xl border border-border/40 bg-input/40 px-3 py-2.5 space-y-1.5">
+                    <div className="flex justify-between font-mono text-xs">
+                      <span className="text-muted-foreground/60">Level</span>
+                      <span>{micLevel}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-secondary overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-75"
+                        style={{ width: `${micLevel}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
           </div>
@@ -2964,12 +3219,22 @@ export function OmnisDashboard() {
 
 
   return (
-    <div className="flex h-full min-h-0 overflow-hidden bg-background">
+    <div className="relative flex h-full min-h-0 overflow-hidden bg-background">
+
+      {/* ── Drawer backdrop ── */}
+      {drawerOpen && (
+        <div
+          className="absolute inset-0 z-20 bg-black/50 backdrop-blur-sm md:hidden"
+          onClick={() => setDrawerOpen(false)}
+          aria-hidden="true"
+        />
+      )}
 
       {/* ── Sidebar ── */}
       <aside className={cn(
-        'flex flex-col w-full md:w-[300px] lg:w-[320px] shrink-0 bg-card/40 border-r border-border/40',
-        selectedChatId !== null && 'hidden md:flex'
+        'absolute inset-y-0 left-0 z-30 flex flex-col w-[300px] bg-card border-r border-border/40 transition-transform duration-200',
+        'md:relative md:translate-x-0 md:flex md:w-[300px] lg:w-[320px] md:shrink-0',
+        drawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
       )}>
 
         {/* ── Brand bar ── */}
@@ -2995,6 +3260,13 @@ export function OmnisDashboard() {
             ) : null}
             <button className="h-8 w-8 flex items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-all" disabled={busy} onClick={() => setScreen('settings')} aria-label="Settings">
               <Settings2 className="h-4 w-4" strokeWidth={1.75} />
+            </button>
+            <button
+              className="h-8 w-8 flex md:hidden items-center justify-center rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-all"
+              onClick={() => setDrawerOpen(false)}
+              aria-label="Close menu"
+            >
+              <X className="h-4 w-4" strokeWidth={1.75} />
             </button>
           </div>
         </div>
@@ -3095,16 +3367,16 @@ export function OmnisDashboard() {
       </aside>
 
       {/* ── Chat section ── */}
-      <section className={cn('relative min-h-0 flex-1 flex-col bg-background', selectedChatId === null ? 'hidden md:flex' : 'flex')}>
+      <section className="relative min-h-0 flex flex-col flex-1 bg-background">
 
         {/* ── Chat header ── */}
         <div className="glass shrink-0 flex items-center gap-3 px-4" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: '12px' }}>
           <button
             className="h-9 w-9 flex md:hidden items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent transition-all shrink-0"
-            onClick={() => setSelectedChatId(null)}
-            aria-label="Back"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Open chat list"
           >
-            <ArrowLeft className="h-5 w-5" strokeWidth={1.75} />
+            <Menu className="h-5 w-5" strokeWidth={1.75} />
           </button>
           {activeChat ? (
             <>
@@ -3191,6 +3463,13 @@ export function OmnisDashboard() {
             ) : null}
             {activeChat === null ? (
               <div className="flex flex-col items-center justify-center gap-5 py-24 text-center">
+                <button
+                  className="md:hidden mb-2 flex items-center gap-2 rounded-xl border border-border/40 px-4 py-2.5 text-sm text-muted-foreground hover:bg-accent transition-all"
+                  onClick={() => setDrawerOpen(true)}
+                >
+                  <Menu className="h-4 w-4" strokeWidth={1.75} />
+                  Open chats
+                </button>
                 <div className="h-16 w-16 rounded-2xl border border-border/40 bg-card flex items-center justify-center">
                   <MessageCircle className="h-7 w-7 text-muted-foreground/30" strokeWidth={1.5} />
                 </div>
