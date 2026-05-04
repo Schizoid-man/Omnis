@@ -1455,3 +1455,56 @@ export async function encryptChatMessage(
   const epoch = await getOrCreateEpoch(chatId, peerUsername, forceRefreshEpoch)
   return encryptMessageForEpoch(plaintext, epoch)
 }
+
+export type UserSession = {
+  id: number
+  device_id: string
+  user_agent: string | null
+  last_accessed: string
+  created_at: string
+  expires_at: string
+  current: boolean
+}
+
+export async function userSessionsList(): Promise<UserSession[]> {
+  return requestJson<UserSession[]>('/users/sessions', { method: 'GET' }, true)
+}
+
+export async function userSessionsRevoke(sessionId: number): Promise<void> {
+  return requestJson<void>(`/users/sessions/revoke/${sessionId}`, { method: 'DELETE' }, true)
+}
+
+export async function userSessionsRevokeOther(): Promise<void> {
+  return requestJson<void>('/users/sessions/revoke_other', { method: 'DELETE' }, true)
+}
+
+export async function fcmRegisterToken(fcmToken: string): Promise<void> {
+  return requestJson<void>(
+    '/device/fcm/register',
+    {
+      method: 'POST',
+      body: JSON.stringify({ fcm_token: fcmToken, platform: 'android' }),
+    },
+    true,
+  )
+}
+
+export async function fcmUnregisterToken(): Promise<void> {
+  return requestJson<void>('/device/fcm/current', { method: 'DELETE' }, true)
+}
+
+export async function registerFcmIfAndroid(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  try {
+    const token = await invokeTauri<string | null>('get_fcm_token')
+    if (!token) {
+      return
+    }
+    await fcmRegisterToken(token)
+  } catch {
+    // best effort — FCM registration failure should not block login
+  }
+}
